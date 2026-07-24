@@ -45,21 +45,13 @@ void ApplyOption(
     else if (name == "port")
     {
         options.server.listener.port = static_cast<std::uint16_t>(
-            ParseUnsigned(name, value, 65535, true));
+            core::ParseUnsigned(name, value, 65535, true));
     }
     else if (name == "backlog")
     {
         options.server.listener.backlog = static_cast<int>(
-            ParseUnsigned(name, value, INT_MAX, false));
+            core::ParseUnsigned(name, value, INT_MAX, false));
     }
-    else if (name == "io-workers")
-        options.server.io_worker_count = static_cast<std::size_t>(ParseUnsigned(name, value, SIZE_MAX, false));
-    else if (name == "application-workers")
-        options.server.application_worker_count = static_cast<std::size_t>(ParseUnsigned(name, value, SIZE_MAX, false));
-    else if (name == "application-queue")
-        options.server.maximum_application_tasks = static_cast<std::size_t>(ParseUnsigned(name, value, SIZE_MAX, false));
-    else if (name == "connection-queue")
-        options.server.maximum_connection_tasks = static_cast<std::size_t>(ParseUnsigned(name, value, SIZE_MAX, false));
     else if (name == "home-dir")
     {
         if (value.empty())
@@ -70,7 +62,7 @@ void ApplyOption(
     {
         using Rep = std::chrono::milliseconds::rep;
         const auto maximum = static_cast<std::uint64_t>(std::chrono::milliseconds::max().count());
-        options.server.shutdown_timeout = std::chrono::milliseconds{static_cast<Rep>(ParseUnsigned(name, value, maximum, false))};
+        options.server.shutdown_timeout = std::chrono::milliseconds{static_cast<Rep>(core::ParseUnsigned(name, value, maximum, false))};
     }
     else
         throw std::invalid_argument("unknown webapp option: " + std::string{name});
@@ -103,7 +95,7 @@ void ApplyToml(
     const toml::table* server = OptionalTable(root, "server");
     if (!server) return;
 
-    RejectUnknownKeys(*server, {"address","port","backlog","io_workers","application_workers","application_queue","connection_queue","shutdown_timeout_ms","home_dir"});
+    RejectUnknownKeys(*server, {"address","port","backlog","shutdown_timeout_ms","home_dir"});
 
     auto apply_int = [&](const char* key) {
         const auto val = ReadTomlInt(*server, key);
@@ -118,10 +110,6 @@ void ApplyToml(
 
     apply_int("port");
     apply_int("backlog");
-    apply_int("io_workers");
-    apply_int("application_workers");
-    apply_int("application_queue");
-    apply_int("connection_queue");
     apply_int("shutdown_timeout_ms");
     apply_str("address");
     apply_str("home_dir");
@@ -133,25 +121,16 @@ void ApplyCli(
 {
     if (const auto val = cli.Option("port"); !val.empty()) ApplyOption(options, "port", val);
     if (const auto val = cli.Option("address"); !val.empty()) ApplyOption(options, "address", val);
-    if (const auto val = cli.Option("backlog"); !val.empty()) ApplyOption(options, "backlog", val);
-    if (const auto val = cli.Option("io-workers"); !val.empty()) ApplyOption(options, "io-workers", val);
-    if (const auto val = cli.Option("application-workers"); !val.empty()) ApplyOption(options, "application-workers", val);
-    if (const auto val = cli.Option("application-queue"); !val.empty()) ApplyOption(options, "application-queue", val);
-    if (const auto val = cli.Option("connection-queue"); !val.empty()) ApplyOption(options, "connection-queue", val);
     if (const auto val = cli.Option("home-dir"); !val.empty()) ApplyOption(options, "home-dir", val);
     if (const auto val = cli.Option("shutdown-timeout-ms"); !val.empty()) ApplyOption(options, "shutdown-timeout-ms", val);
-
-    if (!cli.Positional().empty())
-        ApplyOption(options, "port", cli.Positional()[0]);
+    if (!cli.Positional().empty()) ApplyOption(options, "port", cli.Positional()[0]);
 }
 
 void Validate(WebAppApplicationOptions& options)
 {
     auto& s = options.server;
-    if (s.io_worker_count == 0 || s.application_worker_count == 0 ||
-        s.maximum_application_tasks == 0 || s.maximum_connection_tasks == 0 ||
-        s.listener.backlog <= 0)
-        throw std::invalid_argument("webapp worker, queue, and listener values must be positive");
+    if (s.listener.backlog <= 0)
+        throw std::invalid_argument("webapp backlog must be positive");
 
     if (s.home_directory.empty())
         throw std::invalid_argument("home_directory must not be empty");
@@ -223,8 +202,6 @@ std::string_view WebAppUsage() noexcept
         "  --address VALUE            listen address (default 127.0.0.1)\n"
         "  --port VALUE               listen port (default 8080)\n"
         "  --home-dir PATH            webapp home directory\n"
-        "  --io-workers VALUE         IOCP worker count\n"
-        "  --application-workers VALUE app thread pool size\n"
         "  --shutdown-timeout-ms VALUE\n"
         "\nExamples:\n"
         "  iocp_webapp_server\n"

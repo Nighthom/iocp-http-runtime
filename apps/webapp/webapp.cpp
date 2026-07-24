@@ -45,11 +45,9 @@ WebAppServer::WebAppServer(
     : logger_(std::move(logger))
     , options_(std::move(options))
     , winsock_(logger_)
-    , io_context_(options_.io_worker_count, logger_)
+    , io_context_(2, logger_)
     , application_context_(
-          std::make_shared<execution::ThreadPoolContext>(
-              options_.application_worker_count,
-              options_.maximum_application_tasks))
+          std::make_shared<execution::ThreadPoolContext>(2, 1024))
     , application_executor_(
           std::make_shared<execution::ThreadPoolExecutor>(
               application_context_))
@@ -317,8 +315,7 @@ void WebAppServer::OnAccepted(
         auto connection_slot =
             std::make_shared<std::weak_ptr<TcpConnection>>();
         auto serial_executor = execution::SerialExecutor::Create(
-            application_executor_,
-            options_.maximum_connection_tasks);
+            application_executor_, 128);
         const auto encoder =
             std::make_shared<protocol::http::HttpResponseEncoder>(
                 protocol::http::HttpResponseEncoderOptions{});
@@ -365,7 +362,7 @@ void WebAppServer::OnAccepted(
                     connection->BeginClose(
                         transport::CloseReason::HandlerError);
             },
-            options_.connection);
+            transport::ConnectionOptions{});
         *connection_slot = connection;
 
         registry_->Add(connection);
