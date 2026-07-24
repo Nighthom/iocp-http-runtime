@@ -26,17 +26,22 @@ static std::filesystem::path FindTemplateDir()
     std::filesystem::path exe_dir =
         std::filesystem::path(exe_path).parent_path();
 
-    // 1. exe 기준: ../../apps/webapp/templates
-    auto candidate = exe_dir / ".." / ".." / "apps" / "webapp" / "templates";
+    // 1. bin/ 아래에서 실행: ../../../apps/webapp/templates
+    auto candidate = exe_dir / ".." / ".." / ".." / "apps" / "webapp" / "templates";
     if (std::filesystem::exists(candidate / "login.html"))
         return std::filesystem::canonical(candidate);
 
-    // 2. exe 기준: ../apps/webapp/templates
+    // 2. exe 기준: ../../apps/webapp/templates (flat build dir)
+    candidate = exe_dir / ".." / ".." / "apps" / "webapp" / "templates";
+    if (std::filesystem::exists(candidate / "login.html"))
+        return std::filesystem::canonical(candidate);
+
+    // 3. exe 기준: ../apps/webapp/templates
     candidate = exe_dir / ".." / "apps" / "webapp" / "templates";
     if (std::filesystem::exists(candidate / "login.html"))
         return std::filesystem::canonical(candidate);
 
-    // 3. cwd 기준: apps/webapp/templates
+    // 4. cwd 기준
     candidate = "apps/webapp/templates";
     if (std::filesystem::exists(candidate / "login.html"))
         return std::filesystem::canonical(candidate);
