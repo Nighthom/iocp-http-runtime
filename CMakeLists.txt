@@ -132,10 +132,12 @@ target_link_libraries(iocp_http_server PRIVATE iocp_http_application)
 add_library(iocp_webapp
     apps/webapp/webapp.cpp
     apps/webapp/board_handlers.cpp
+    apps/webapp/configuration.cpp
 )
 target_link_libraries(
     iocp_webapp
     PUBLIC iocp_server_core
+    PRIVATE tomlplusplus::tomlplusplus
 )
 target_include_directories(
     iocp_webapp

@@ -1,0 +1,12 @@
+schema_version = 1
+
+[server]
+address = "127.0.0.1"
+port = 8080
+backlog = 128
+io_workers = 2
+application_workers = 2
+application_queue = 1024
+connection_queue = 128
+shutdown_timeout_ms = 10000
+template_dir = "apps/webapp/templates"
