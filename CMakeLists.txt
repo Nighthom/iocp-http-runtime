@@ -145,6 +145,10 @@ target_include_directories(
         "${CMAKE_CURRENT_SOURCE_DIR}/apps"
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
+target_compile_definitions(
+    iocp_webapp
+    PRIVATE IOCP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
 
 add_executable(iocp_webapp_server apps/webapp/main.cpp)
 target_link_libraries(iocp_webapp_server PRIVATE iocp_webapp)

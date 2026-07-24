@@ -4,10 +4,9 @@
 
 #include <toml++/toml.hpp>
 
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
+#ifndef IOCP_SOURCE_DIR
+#define IOCP_SOURCE_DIR "."
 #endif
-#include <Windows.h>
 
 #include <charconv>
 #include <climits>
@@ -47,7 +46,7 @@ std::uint64_t ParseUnsigned(
 
 void ApplyOption(
     WebAppApplicationOptions& options,
-    std::string_view name,
+    const std::string_view name,
     const std::string_view value)
 {
     if (name == "address")
@@ -96,8 +95,7 @@ void ApplyOption(
     else if (name == "home-dir")
     {
         if (value.empty())
-            throw std::invalid_argument(
-                "home-dir must not be empty");
+            throw std::invalid_argument("home-dir must not be empty");
         options.server.home_directory = value;
     }
     else if (name == "shutdown-timeout-ms")
@@ -143,7 +141,6 @@ void ApplyToml(
     const toml::table* server = root.get("server")->as_table();
     if (!server) return;
 
-    // TOML key는 underscore, ApplyOption은 hyphen을 기대하므로 변환
     auto to_cli = [](const char* key) {
         std::string s(key);
         for (auto& c : s) if (c == '_') c = '-';
@@ -178,29 +175,11 @@ void ApplyToml(
     apply_int("shutdown_timeout_ms");
     apply_str("address");
     apply_str("home_dir");
-
-    // home_dir는 config 파일이 있는 디렉터리 기준으로 resolve
-    const auto* td_node = server->get("home_dir");
-    if (td_node)
-    {
-        const auto td = td_node->value_exact<std::string>();
-        if (td)
-        {
-            std::filesystem::path home_path(*td);
-            if (home_path.is_relative())
-            {
-                home_path = path.parent_path() / home_path;
-            }
-            options.server.home_directory =
-                std::filesystem::absolute(home_path).string();
-        }
-    }
 }
 
 std::optional<std::filesystem::path> FindConfigFile(
     const std::vector<std::string_view>& arguments)
 {
-    // --config CLI가 명시됐으면 그대로 사용
     for (std::size_t index = 0; index < arguments.size(); ++index)
     {
         const std::string_view arg = arguments[index];
@@ -222,26 +201,6 @@ std::optional<std::filesystem::path> FindConfigFile(
                 "--config must specify one non-empty path");
         return std::filesystem::path{value};
     }
-
-    // --config 없으면 exe 기준으로 config/webapp.toml 검색
-    char exe_path[MAX_PATH];
-    if (GetModuleFileNameA(nullptr, exe_path, sizeof(exe_path)) == 0)
-        return std::nullopt;
-
-    std::filesystem::path exe_dir =
-        std::filesystem::path(exe_path).parent_path();
-
-    // bin/ 아래: ../../config/webapp.toml (build/windows-debug/bin → project root)
-    for (int levels = 1; levels <= 3; ++levels)
-    {
-        auto parent = exe_dir;
-        for (int i = 0; i < levels; ++i)
-            parent = parent / "..";
-        auto candidate = parent / "config" / "webapp.toml";
-        if (std::filesystem::exists(candidate))
-            return std::filesystem::canonical(candidate);
-    }
-
     return std::nullopt;
 }
 
@@ -312,7 +271,6 @@ void Validate(WebAppApplicationOptions& options)
         throw std::invalid_argument(
             "home_directory must not be empty");
     }
-    // 상대 경로면 absolute로 resolve
     s.home_directory =
         std::filesystem::absolute(s.home_directory).string();
     if (!std::filesystem::exists(s.home_directory))
@@ -332,6 +290,8 @@ void Validate(WebAppApplicationOptions& options)
 WebAppApplicationOptions::WebAppApplicationOptions()
 {
     server.listener.port = 8080;
+    server.home_directory =
+        (std::filesystem::path(IOCP_SOURCE_DIR) / "apps" / "webapp" / "templates").string();
 }
 
 WebAppApplicationOptions LoadWebAppOptions(
@@ -355,11 +315,12 @@ std::string_view WebAppUsage() noexcept
         "  --config PATH              TOML config file\n"
         "  --address VALUE            listen address (default 127.0.0.1)\n"
         "  --port VALUE               listen port (default 8080)\n"
-        "  --home-dir PATH           webapp home directory (required)\n"
+        "  --home-dir PATH            webapp home directory\n"
         "  --io-workers VALUE         IOCP worker count\n"
         "  --application-workers VALUE app thread pool size\n"
         "  --shutdown-timeout-ms VALUE\n"
         "\nExamples:\n"
+        "  iocp_webapp_server\n"
         "  iocp_webapp_server --config config/webapp.toml\n"
         "  iocp_webapp_server --port 3000 --home-dir apps/webapp/templates\n";
 }
