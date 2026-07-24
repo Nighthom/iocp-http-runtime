@@ -1,178 +1,137 @@
 # iocp-http-runtime
 
-Windows IOCP 위에 전송 계층부터 HTTP/1.1 요청 처리까지 직접 조립한 C++17 서버 런타임입니다.
+Windows IOCP 위에 transport, execution, HTTP/1.1, HTTP/2를 직접 조립한 C++17 서버 런타임입니다.
 
-프레임워크를 대체하려는 프로젝트라기보다, 비동기 I/O에서 발생하는 객체 수명, 실행 문맥,
-스트림 파싱, backpressure, 종료 순서를 코드로 확인하기 위한 학습용 구현입니다.
+비동기 I/O에서 발생하는 객체 수명, 실행 문맥, 스트림 파싱, backpressure, shutdown 순서를 코드로 확인하기 위한 학습용 구현입니다.
 
-## Demo
+## Quick Start
 
 ```powershell
-.\build\windows-debug\iocp_http_server.exe --config config\http_server.toml
+# HTTP/1.1 서버
+.\build\windows-debug\bin\iocp_http_server.exe --config config\http_server.toml
+
+# 게시판 웹앱 (인자 없이 실행 가능)
+.\build\windows-debug\bin\iocp_webapp_server.exe
 ```
 
 ```powershell
 curl.exe http://127.0.0.1:8080/health
 # {"status":"ok"}
 
-curl.exe -X POST http://127.0.0.1:8080/echo `
-  -H "Content-Type: text/plain" `
-  --data-binary "hello IOCP"
-# hello IOCP
+curl.exe -X POST http://127.0.0.1:8080/echo -H "Content-Type: text/plain" -d "hello"
+# hello
 ```
-
-기본 라우트:
-
-| Method | Path | Description |
-| --- | --- | --- |
-| `GET` | `/` | 서비스와 endpoint 목록 |
-| `GET` | `/health` | 서버 상태 확인 |
-| `POST` | `/echo` | 요청 body 반환 |
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    Client --> Listener["TcpListener / AcceptEx"]
-    Listener --> Connection["TcpConnection"]
-    Connection --> IOCP["IoContext / IOCP workers"]
-    IOCP --> Session["HttpSession"]
-    Session --> Parser["Incremental HTTP parser"]
-    Parser --> Serial["Per-connection SerialExecutor"]
-    Serial --> Pool["Application ThreadPoolExecutor"]
-    Pool --> Router["HttpRouter / Handler"]
-    Router --> Encoder["HttpResponseEncoder"]
-    Encoder --> Queue["Bounded SendQueue"]
-    Queue --> Connection
+```
+TCP bytes → TcpConnection → HttpSession / H2Session
+                ↓                    ↓
+         IoContext workers    HttpRouter::Dispatch
+                                     ↓
+                            application thread pool
+                                     ↓
+                              route handler → response encoder → send queue
 ```
 
-IOCP worker는 완료 통지와 transport 상태 전이만 담당합니다. 사용자 handler는 별도 application
-thread pool에서 실행하고, connection마다 `SerialExecutor`를 두어 HTTP 응답 순서를 보존합니다.
+IOCP worker는 completion과 transport 상태 전이만 담당합니다. handler는 별도 application thread pool에서 실행하고, connection마다 `SerialExecutor`로 응답 순서를 보존합니다.
 
 ## Implemented
 
-- `AcceptEx`, `ConnectEx`, `WSARecv`, `WSASend` 기반 비동기 socket 처리
-- `OVERLAPPED`와 operation 객체의 명시적인 수명 관리
-- bounded thread pool, IOCP executor, serial executor
-- 하나의 connection당 하나의 pending receive와 send 유지
-- partial send와 여러 buffer를 묶는 gathered send
-- bounded send queue와 queue overflow 시 fail-closed 정책
-- ring receive buffer와 분할된 TCP 입력을 처리하는 incremental parser
-- HTTP/1.1 `GET`, `POST`, `Content-Length`, keep-alive, pipelining
-- exact path routing과 `404`, `405` 응답
-- 요청 크기 제한과 `400`, `413`, `414`, `431` 오류 응답
-- 응답 전송 완료 후 connection을 닫는 close-after-send
-- listener stop, connection drain, executor stop 순서의 coordinated shutdown
-- TOML 기반 typed configuration과 입력 검증
-- stdout, stderr, file sink를 조합할 수 있는 thread-safe logger
+**Transport:**
+- `AcceptEx`, `ConnectEx`, `WSARecv`, `WSASend` 기반 비동기 socket
+- `OVERLAPPED`와 operation 객체의 명시적 수명 관리
+- partial send, gathered send (`WSABUF` 배열)
+- bounded send queue (overflow → fail-closed)
+- ring receive buffer, 연결 drain, coordinated shutdown
 
-## HTTP Scope
+**Execution:**
+- bounded `ThreadPoolExecutor`, `IocpExecutor`, `SerialExecutor`
+- `StopMode::Drain` / `StopMode::CancelPending`
+- native completion과 분리된 custom IOCP task packet
 
-현재 구현은 작은 HTTP/1.1 서비스에 필요한 범위만 의도적으로 지원합니다.
+**HTTP/1.1:**
+- incremental parser (모든 byte split boundary 통과)
+- `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`
+- `Content-Length`, `Transfer-Encoding: chunked`
+- `Expect: 100-continue`
+- keep-alive, pipelining, request/header/body 크기 제한
+- `400`, `404`, `405`, `413`, `414`, `431`, `500` 오류 응답
+- `request_id` / `connection_id` 추적
 
-지원:
+**HTTP/2:**
+- binary frame layer (9-byte header + payload)
+- stream state machine (Idle→Open→HalfClosed→Closed)
+- HPACK (static table 61개 + dynamic table, literal encoding)
+- `SETTINGS`, `HEADERS`, `DATA`, `RST_STREAM`, `WINDOW_UPDATE`, `PING`, `GOAWAY`
+- h2c prior knowledge detection
+- connection/stream flow control
+- HTTP/1.1과 동일한 `HttpRouter` 공유
 
-- origin-form request target
-- `GET`, `POST`
-- 필수 `Host` 검증
-- `Content-Length` body
-- persistent connection과 `Connection: close`
-- 같은 connection의 pipelined request
+**Application:**
+- TOML 기반 configuration (CLI > TOML > defaults)
+- 공통 `config_utils` (CliParser, TOML helpers, config auto-detect)
+- `SimpleTemplate` (`{{key}}` 치환 템플릿 엔진)
+- 게시판 + 로그인 웹앱 (session cookie, in-memory storage)
+- handler 단위 테스트 (socket/server 독립)
 
-미지원:
+## Programs
 
-- chunked transfer encoding
-- multipart form data
-- TLS
-- path parameter와 wildcard route
-- HTTP/2, HTTP/3
-
-parser 또는 executor가 입력을 더 받을 수 없는 상태가 되면 연결을 계속 살려두지 않습니다.
-프로토콜 경계가 불명확해진 연결을 빠르게 종료하는 쪽을 기본 정책으로 선택했습니다.
+| Target | Description |
+|---|---|
+| `iocp_echo_server` | length-prefixed echo server |
+| `iocp_echo_client` | blocking CLI echo client |
+| `iocp_http_server` | HTTP/1.1 + HTTP/2 server |
+| `iocp_webapp_server` | 게시판 + 로그인 웹앱 |
 
 ## Build
 
-필요 환경:
-
-- Windows 10/11
-- C++17 compiler
-- CMake 3.25+
-- Ninja
-- Git 및 인터넷 연결 (최초 configure 시 `toml++` 다운로드)
-
-MinGW-w64 GCC 15.2에서 Debug/Release clean build와 테스트를 확인했습니다.
+Windows 10/11, C++17, CMake 3.25+, Ninja. MinGW-w64 GCC 15.2 검증 완료.
 
 ```powershell
+# Debug
 cmake --preset windows-debug
 cmake --build --preset windows-debug
 ctest --preset windows-debug
 
+# Release
 cmake --preset windows-release
 cmake --build --preset windows-release
 ctest --preset windows-release
+
+# Install (배포)
+cmake --install build/windows-release --prefix dist
 ```
 
-`IOCP_WARNINGS_AS_ERRORS=ON`이 기본값입니다.
-
-## Configuration
-
-HTTP 서버 설정은 [config/http_server.toml](config/http_server.toml)에 있습니다.
-
-```toml
-[server]
-address = "127.0.0.1"
-port = 8080
-io_workers = 2
-application_workers = 2
-application_queue = 1024
-
-[server.connection]
-receive_chunk_bytes = 4096
-send_queue_bytes = 2097152
-send_gather_segments = 16
-
-[http]
-maximum_header_bytes = 32768
-maximum_body_bytes = 1048576
-maximum_requests_per_connection = 100
-```
-
-전체 설정은 시작 시 검증되며, CLI 값이 TOML과 기본값보다 우선합니다.
-
-```powershell
-.\build\windows-debug\iocp_http_server.exe --help
-.\build\windows-debug\iocp_http_server.exe 8081
-```
+빌드 아웃풋은 `bin/`(실행파일), `lib/`(라이브러리), `test/`(테스트)로 분리됩니다.
 
 ## Tests
 
-별도 test framework 없이 실행 가능한 작은 test target과 CTest를 사용합니다.
+11개 test suite, Debug/Release 모두 통과.
 
-- buffer와 ring buffer 경계
-- executor ordering, saturation, shutdown
-- loopback transport와 connector
-- length-prefixed sample protocol
-- HTTP parser, encoder, router, session
-- 실제 loopback HTTP server
-- TOML/CLI configuration validation
-
-현재 8개 test target이 Debug와 Release preset에 연결되어 있습니다.
+| Test | Coverage |
+|---|---|
+| `buffer_tests` | ByteView, BufferSequence, ring/linear buffer |
+| `execution_tests` | Executor ordering, saturation, stop modes |
+| `m2_transport_tests` | TCP listener, connector, connection, echo, shutdown |
+| `protocol_tests` | Length-prefixed codec, session, dispatcher |
+| `http_tests` | HTTP parser, router, encoder, session |
+| `http_chunked_tests` | Chunked encoding at all split boundaries, 100-continue |
+| `http2_tests` | Frame header encode/decode, HPACK round-trip |
+| `webapp_handler_tests` | Login, post CRUD, HTML escape, template render |
+| `http_server_tests` | Loopback HTTP/1.1 server |
+| `http_configuration_tests` | HTTP CLI/TOML validation |
+| `configuration_tests` | Echo CLI/environment/TOML validation |
 
 ## Repository Layout
 
 | Path | Role |
-| --- | --- |
-| [`apps/`](apps/README.md) | 실행 파일, service composition root, route 등록 |
-| [`config/`](config/README.md) | echo와 HTTP 서버의 TOML 설정 예시 |
-| [`src/`](src/README.md) | reusable runtime, transport, execution, protocol |
-| [`tests/`](tests/README.md) | unit, loopback integration, configuration tests |
-
-상위 README는 실행과 공개 범위를 설명하고, 각 디렉터리 README는 코드를
-읽거나 수정할 때 필요한 책임 경계만 설명합니다. 세부 source 디렉터리는
-구조가 더 커지기 전까지 별도 README를 두지 않습니다.
+|---|---|
+| [`apps/`](apps/README.md) | 실행 파일, composition root, configuration |
+| [`config/`](config/README.md) | TOML 설정 예시 |
+| [`src/`](src/README.md) | 재사용 가능한 runtime library |
+| [`tests/`](tests/README.md) | 단위/통합 테스트 |
 
 ## Project Status
 
-`v0.1.0`은 transport, execution, buffering, HTTP/1.1 vertical slice가 연결된 첫 공개
-버전입니다. 다음 단계에서는 실제 application service를 얹으면서 timeout, observability,
-outbound HTTP 같은 운영 경계를 확장할 예정입니다.
+`feat/m4-m5-m6-http-reliability` 브랜치 기준. M4(Reliability), M5(HTTP/1.1 Hardening), M6(HTTP/2 Core) 기본 구현 완료. `v0.1.0` 이후 다음 단계로 M7(AI Service), M8(CI/CD + Metrics) 예정.
