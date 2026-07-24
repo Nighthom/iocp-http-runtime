@@ -19,11 +19,11 @@ namespace
 
 using iocp::protocol::http::SimpleTemplate;
 
-std::string g_template_dir = "apps/webapp/templates";
+std::string g_home_dir = "apps/webapp/templates";
 
 SimpleTemplate LoadTemplate(const std::string& name)
 {
-    return SimpleTemplate::Load(g_template_dir + "/" + name);
+    return SimpleTemplate::Load(g_home_dir + "/" + name);
 }
 
 std::string FormatDate(
@@ -41,14 +41,14 @@ std::atomic<std::uint64_t> g_next_post_id{1};
 
 } // namespace
 
-void SetTemplateDirectory(std::string path)
+void SetHomeDirectory(std::string path)
 {
-    g_template_dir = std::move(path);
+    g_home_dir = std::move(path);
 }
 
-std::string GetTemplateDirectory()
+std::string GetHomeDirectory()
 {
-    return g_template_dir;
+    return g_home_dir;
 }
 
 std::string HtmlEscape(const std::string& value)

@@ -41,7 +41,7 @@ int main(const int argc, char* argv[])
             "웹앱 서버를 시작합니다.",
             {{"port", std::to_string(
                           options.server.listener.port)},
-             {"templates", options.server.template_directory}});
+             {"templates", options.server.home_directory}});
 
         auto server = iocp::server::WebAppServer::Create(
             logger, options.server);

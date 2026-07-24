@@ -88,12 +88,12 @@ void ApplyOption(
                 ParseUnsigned(name, value,
                     std::numeric_limits<std::size_t>::max(), false));
     }
-    else if (name == "template-dir")
+    else if (name == "home-dir")
     {
         if (value.empty())
             throw std::invalid_argument(
-                "template-dir must not be empty");
-        options.server.template_directory = value;
+                "home-dir must not be empty");
+        options.server.home_directory = value;
     }
     else if (name == "shutdown-timeout-ms")
     {
@@ -166,22 +166,22 @@ void ApplyToml(
     apply_int("connection_queue");
     apply_int("shutdown_timeout_ms");
     apply_str("address");
-    apply_str("template_dir");
+    apply_str("home_dir");
 
-    // template_dir가 상대 경로면 config file 기준으로 resolve
-    const auto* td_node = server->get("template_dir");
+    // home_dir가 상대 경로면 config file 기준으로 resolve
+    const auto* td_node = server->get("home_dir");
     if (td_node)
     {
         const auto td = td_node->value_exact<std::string>();
         if (td)
         {
-            std::filesystem::path template_path(*td);
-            if (template_path.is_relative())
+            std::filesystem::path home_path(*td);
+            if (home_path.is_relative())
             {
-                template_path = path.parent_path() / template_path;
+                home_path = path.parent_path() / home_path;
             }
-            options.server.template_directory =
-                std::filesystem::absolute(template_path).string();
+            options.server.home_directory =
+                std::filesystem::absolute(home_path).string();
         }
     }
 }
@@ -276,18 +276,18 @@ void Validate(WebAppApplicationOptions& options)
         throw std::invalid_argument(
             "webapp worker, queue, and listener values must be positive");
     }
-    if (s.template_directory.empty())
+    if (s.home_directory.empty())
     {
         throw std::invalid_argument(
-            "template_directory must not be empty");
+            "home_directory must not be empty");
     }
     // 상대 경로면 absolute로 resolve
-    s.template_directory =
-        std::filesystem::absolute(s.template_directory).string();
-    if (!std::filesystem::exists(s.template_directory))
+    s.home_directory =
+        std::filesystem::absolute(s.home_directory).string();
+    if (!std::filesystem::exists(s.home_directory))
     {
         throw std::invalid_argument(
-            "template directory not found: " + s.template_directory);
+            "home directory not found: " + s.home_directory);
     }
     if (s.shutdown_timeout <= std::chrono::milliseconds::zero())
     {
@@ -324,13 +324,13 @@ std::string_view WebAppUsage() noexcept
         "  --config PATH              TOML config file\n"
         "  --address VALUE            listen address (default 127.0.0.1)\n"
         "  --port VALUE               listen port (default 8080)\n"
-        "  --template-dir PATH        template directory (required)\n"
+        "  --home-dir PATH           webapp home directory (required)\n"
         "  --io-workers VALUE         IOCP worker count\n"
         "  --application-workers VALUE app thread pool size\n"
         "  --shutdown-timeout-ms VALUE\n"
         "\nExamples:\n"
         "  iocp_webapp_server --config config/webapp.toml\n"
-        "  iocp_webapp_server --port 3000 --template-dir apps/webapp/templates\n";
+        "  iocp_webapp_server --port 3000 --home-dir apps/webapp/templates\n";
 }
 
 } // namespace iocp::application

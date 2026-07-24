@@ -9,4 +9,4 @@ application_workers = 2
 application_queue = 1024
 connection_queue = 128
 shutdown_timeout_ms = 10000
-template_dir = "apps/webapp/templates"
+home_dir = "apps/webapp/templates"

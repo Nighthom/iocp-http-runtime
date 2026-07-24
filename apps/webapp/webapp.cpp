@@ -58,7 +58,7 @@ WebAppServer::WebAppServer(
     , router_(
           std::make_shared<protocol::http::HttpRouter>())
 {
-    webapp::SetTemplateDirectory(options_.template_directory);
+    webapp::SetHomeDirectory(options_.home_directory);
 }
 
 WebAppServer::~WebAppServer()

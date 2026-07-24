@@ -25,8 +25,8 @@ struct Post final
 };
 
 /// @brief template 파일이 있는 directory를 설정한다.
-void SetTemplateDirectory(std::string path);
-std::string GetTemplateDirectory();
+void SetHomeDirectory(std::string path);
+std::string GetHomeDirectory();
 
 /// @brief login page 렌더링
 protocol::http::HttpResponse HandleLoginPage(
