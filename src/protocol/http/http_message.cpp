@@ -62,6 +62,26 @@ HttpMethod ParseMethod(const std::string_view value) noexcept
     {
         return HttpMethod::Post;
     }
+    if (value == "PUT")
+    {
+        return HttpMethod::Put;
+    }
+    if (value == "DELETE")
+    {
+        return HttpMethod::Delete_;
+    }
+    if (value == "PATCH")
+    {
+        return HttpMethod::Patch;
+    }
+    if (value == "HEAD")
+    {
+        return HttpMethod::Head;
+    }
+    if (value == "OPTIONS")
+    {
+        return HttpMethod::Options;
+    }
     return HttpMethod::Unsupported;
 }
 
@@ -73,8 +93,18 @@ std::string_view MethodName(const HttpMethod method) noexcept
         return "GET";
     case HttpMethod::Post:
         return "POST";
+    case HttpMethod::Put:
+        return "PUT";
+    case HttpMethod::Delete_:
+        return "DELETE";
+    case HttpMethod::Patch:
+        return "PATCH";
+    case HttpMethod::Head:
+        return "HEAD";
+    case HttpMethod::Options:
+        return "OPTIONS";
     case HttpMethod::Unsupported:
-        return "UNSUPPORTED";
+        break;
     }
     return "UNSUPPORTED";
 }
@@ -142,6 +172,40 @@ HttpResponse MakeTextResponse(
         HttpHeader{"Content-Type", std::string(content_type)});
     response.body = BytesFromString(body);
     return response;
+}
+
+std::unordered_map<std::string, std::string>
+HttpRequest::QueryParams() const
+{
+    std::unordered_map<std::string, std::string> params;
+    if (query.empty())
+    {
+        return params;
+    }
+
+    std::string_view remaining = query;
+    while (!remaining.empty())
+    {
+        const auto eq = remaining.find('=');
+        const auto amp = remaining.find('&');
+        const auto segment_end =
+            std::min(amp, remaining.size());
+
+        const auto key = remaining.substr(0, eq);
+        const auto val = eq != std::string_view::npos &&
+                eq < segment_end
+            ? remaining.substr(eq + 1, segment_end - eq - 1)
+            : std::string_view{};
+
+        params.emplace(key, val);
+
+        if (amp == std::string_view::npos)
+        {
+            break;
+        }
+        remaining = remaining.substr(amp + 1);
+    }
+    return params;
 }
 
 } // namespace iocp::protocol::http

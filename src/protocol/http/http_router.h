@@ -47,6 +47,8 @@ private:
     {
         HttpHandler get;
         HttpHandler post;
+        HttpHandler put;
+        HttpHandler delete_;
     };
 
     static HttpResponse MethodNotAllowed(

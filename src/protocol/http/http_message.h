@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace iocp::protocol::http
@@ -17,6 +18,11 @@ enum class HttpMethod : std::uint8_t
 {
     Get,
     Post,
+    Put,
+    Delete_,
+    Patch,
+    Head,
+    Options,
     Unsupported,
 };
 
@@ -39,6 +45,9 @@ struct HttpRequest final
 
     std::optional<std::string_view> Header(
         std::string_view name) const noexcept;
+
+    /// @brief query string을 key-value map으로 분해한다.
+    std::unordered_map<std::string, std::string> QueryParams() const;
 };
 
 struct HttpResponse final
