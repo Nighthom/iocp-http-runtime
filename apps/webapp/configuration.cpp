@@ -179,7 +179,7 @@ void ApplyToml(
     apply_str("address");
     apply_str("home_dir");
 
-    // home_dir가 상대 경로면 config file 기준으로 resolve
+    // home_dir가 상대 경로면 config file의 상위 디렉터리(프로젝트 루트) 기준으로 resolve
     const auto* td_node = server->get("home_dir");
     if (td_node)
     {
@@ -189,7 +189,7 @@ void ApplyToml(
             std::filesystem::path home_path(*td);
             if (home_path.is_relative())
             {
-                home_path = path.parent_path() / home_path;
+                home_path = path.parent_path().parent_path() / home_path;
             }
             options.server.home_directory =
                 std::filesystem::absolute(home_path).string();
