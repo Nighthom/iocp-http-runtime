@@ -2,10 +2,10 @@
 // 검증한 뒤 logger를 조립한다.
 
 #include "echo_server/configuration.h"
+#include "core/config_utils.h"
 #include "echo_server/toml_config_loader.h"
 
 #include <algorithm>
-#include <charconv>
 #include <cctype>
 #include <climits>
 #include <cstdlib>
@@ -57,30 +57,6 @@ std::string Lowercase(const std::string_view value)
             static_cast<char>(std::tolower(character)));
     }
     return result;
-}
-
-std::uint64_t ParseUnsigned(
-    const std::string_view name,
-    const std::string_view value,
-    const std::uint64_t maximum,
-    const bool allow_zero)
-{
-    std::uint64_t parsed = 0;
-    const auto result = std::from_chars(
-        value.data(),
-        value.data() + value.size(),
-        parsed);
-    if (value.empty() ||
-        result.ec != std::errc{} ||
-        result.ptr != value.data() + value.size() ||
-        (!allow_zero && parsed == 0) ||
-        parsed > maximum)
-    {
-        throw std::invalid_argument(
-            std::string{name} + " 값이 범위를 벗어났습니다: " +
-            std::string{value});
-    }
-    return parsed;
 }
 
 bool ParseBoolean(
@@ -173,17 +149,17 @@ void ApplyOption(
     else if (name == "port")
     {
         options.server.listener.port = static_cast<std::uint16_t>(
-            ParseUnsigned(name, value, 65535, true));
+            core::ParseUnsigned(name, value, 65535, true));
     }
     else if (name == "backlog")
     {
         options.server.listener.backlog = static_cast<int>(
-            ParseUnsigned(name, value, INT_MAX, false));
+            core::ParseUnsigned(name, value, INT_MAX, false));
     }
     else if (name == "io-workers")
     {
         options.server.io_worker_count = static_cast<std::size_t>(
-            ParseUnsigned(
+            core::ParseUnsigned(
                 name,
                 value,
                 std::numeric_limits<std::size_t>::max(),
@@ -193,13 +169,13 @@ void ApplyOption(
     {
         options.server.connection.receive_chunk_bytes =
             static_cast<std::size_t>(
-                ParseUnsigned(name, value, ULONG_MAX, false));
+                core::ParseUnsigned(name, value, ULONG_MAX, false));
     }
     else if (name == "send-queue-items")
     {
         options.server.connection.maximum_send_queue_items =
             static_cast<std::size_t>(
-                ParseUnsigned(
+                core::ParseUnsigned(
                     name,
                     value,
                     std::numeric_limits<std::size_t>::max(),
@@ -209,7 +185,7 @@ void ApplyOption(
     {
         options.server.connection.maximum_send_queue_bytes =
             static_cast<std::size_t>(
-                ParseUnsigned(
+                core::ParseUnsigned(
                     name,
                     value,
                     std::numeric_limits<std::size_t>::max(),
@@ -219,7 +195,7 @@ void ApplyOption(
     {
         options.server.connection.maximum_gather_segments_per_operation =
             static_cast<std::size_t>(
-                ParseUnsigned(
+                core::ParseUnsigned(
                     name,
                     value,
                     std::numeric_limits<DWORD>::max(),
@@ -229,13 +205,13 @@ void ApplyOption(
     {
         options.server.connection.maximum_gather_bytes_per_operation =
             static_cast<std::size_t>(
-                ParseUnsigned(name, value, ULONG_MAX, false));
+                core::ParseUnsigned(name, value, ULONG_MAX, false));
     }
     else if (name == "outbound-batch-segments")
     {
         options.server.connection.maximum_outbound_batch_segments =
             static_cast<std::size_t>(
-                ParseUnsigned(
+                core::ParseUnsigned(
                     name,
                     value,
                     std::numeric_limits<std::size_t>::max(),
@@ -248,7 +224,7 @@ void ApplyOption(
         using MillisecondsRep = std::chrono::milliseconds::rep;
         options.server.shutdown_timeout = std::chrono::milliseconds{
             static_cast<MillisecondsRep>(
-                ParseUnsigned(name, value, maximum, false))};
+                core::ParseUnsigned(name, value, maximum, false))};
     }
     else if (name == "console-log")
     {
@@ -323,7 +299,7 @@ void ApplyEnvironment(
 }
 
 std::optional<std::filesystem::path> FindConfigurationFile(
-    const std::vector<std::string_view>& arguments,
+    const core::CliParser& cli,
     const EnvironmentLookup& environment)
 {
     std::optional<std::filesystem::path> selected;
@@ -336,42 +312,9 @@ std::optional<std::filesystem::path> FindConfigurationFile(
         }
         selected = *value;
     }
-
-    bool command_line_config_was_set = false;
-    for (std::size_t index = 0; index < arguments.size(); ++index)
+    if (cli.config_file)
     {
-        const std::string_view argument = arguments[index];
-        std::string_view value;
-        if (argument == "--config")
-        {
-            if (index + 1 >= arguments.size())
-            {
-                throw std::invalid_argument(
-                    "설정 값이 없습니다: --config");
-            }
-            value = arguments[++index];
-        }
-        else if (argument.rfind("--config=", 0) == 0)
-        {
-            value = argument.substr(std::string_view{"--config="}.size());
-        }
-        else
-        {
-            continue;
-        }
-
-        if (command_line_config_was_set)
-        {
-            throw std::invalid_argument(
-                "config는 한 번만 지정할 수 있습니다");
-        }
-        if (value.empty())
-        {
-            throw std::invalid_argument(
-                "config path는 비어 있을 수 없습니다");
-        }
-        selected = value;
-        command_line_config_was_set = true;
+        selected = *cli.config_file;
     }
     return selected;
 }
@@ -511,13 +454,13 @@ void ApplyClientOption(
     else if (name == "port")
     {
         options.port = static_cast<std::uint16_t>(
-            ParseUnsigned(name, value, 65535, false));
+            core::ParseUnsigned(name, value, 65535, false));
     }
     else if (name == "send-timeout-ms")
     {
         options.send_timeout = std::chrono::milliseconds{
             static_cast<std::chrono::milliseconds::rep>(
-                ParseUnsigned(
+                core::ParseUnsigned(
                     name,
                     value,
                     std::numeric_limits<std::uint32_t>::max(),
@@ -527,7 +470,7 @@ void ApplyClientOption(
     {
         options.receive_timeout = std::chrono::milliseconds{
             static_cast<std::chrono::milliseconds::rep>(
-                ParseUnsigned(
+                core::ParseUnsigned(
                     name,
                     value,
                     std::numeric_limits<std::uint32_t>::max(),
@@ -689,8 +632,11 @@ EchoApplicationOptions LoadEchoApplicationOptions(
         environment = ReadProcessEnvironment;
     }
 
+    const core::CliParser cli(arguments);
+    options.show_help = cli.show_help;
+
     if (const auto config_file =
-            FindConfigurationFile(arguments, environment))
+            FindConfigurationFile(cli, environment))
     {
         options.config_file = *config_file;
         for (const detail::ConfigurationOverride& entry :
