@@ -1,0 +1,179 @@
+cmake_minimum_required(VERSION 3.25)
+
+project(iocp_http_runtime LANGUAGES CXX)
+
+include(CTest)
+include(FetchContent)
+find_package(Threads REQUIRED)
+
+option(IOCP_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
+
+FetchContent_Declare(
+    tomlplusplus
+    GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
+    GIT_TAG 30172438cee64926dc41fdd9c11fb3ba5b2ba9de # v3.4.0
+)
+FetchContent_MakeAvailable(tomlplusplus)
+
+function(iocp_enable_project_warnings target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /permissive- /EHsc /utf-8)
+        if(IOCP_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE /WX)
+        endif()
+    else()
+        target_compile_options(
+            ${target}
+            PRIVATE
+                -Wall
+                -Wextra
+                -Wpedantic
+                -finput-charset=UTF-8
+                -fexec-charset=UTF-8
+        )
+        if(IOCP_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE -Werror)
+        endif()
+    endif()
+endfunction()
+
+add_library(iocp_server_core
+    src/buffer/receive_buffer.cpp
+    src/buffer/ring_receive_buffer.cpp
+    src/core/logging.cpp
+    src/execution/iocp_executor.cpp
+    src/execution/manual_executor.cpp
+    src/execution/serial_executor.cpp
+    src/execution/thread_pool_executor.cpp
+    src/runtime/io_context.cpp
+    src/platform/windows/winsock_runtime.cpp
+    src/protocol/http/http_message.cpp
+    src/protocol/http/http_request_parser.cpp
+    src/protocol/http/http_response_encoder.cpp
+    src/protocol/http/http_router.cpp
+    src/protocol/http/http_session.cpp
+    src/protocol/sample/length_prefixed_codec.cpp
+    src/protocol/sample/length_prefixed_session.cpp
+    src/protocol/sample/sample_dispatcher.cpp
+    src/transport/connection_registry.cpp
+    src/transport/send_queue.cpp
+    src/transport/tcp_connection.cpp
+    src/transport/tcp_connector.cpp
+    src/transport/tcp_listener.cpp
+)
+
+target_compile_features(iocp_server_core PUBLIC cxx_std_17)
+target_include_directories(iocp_server_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(iocp_server_core PUBLIC Threads::Threads ws2_32)
+
+add_library(iocp_echo_application
+    apps/echo_server/configuration.cpp
+    apps/echo_server/echo_server.cpp
+    apps/echo_server/toml_config_loader.cpp
+)
+target_link_libraries(
+    iocp_echo_application
+    PUBLIC iocp_server_core
+    PRIVATE tomlplusplus::tomlplusplus
+)
+target_include_directories(
+    iocp_echo_application
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
+add_executable(iocp_echo_server apps/echo_server/main.cpp)
+target_link_libraries(iocp_echo_server PRIVATE iocp_echo_application)
+
+add_executable(iocp_echo_client apps/echo_client/main.cpp)
+target_link_libraries(iocp_echo_client PRIVATE iocp_echo_application)
+
+add_library(iocp_http_application
+    apps/http_server/configuration.cpp
+    apps/http_server/http_server.cpp
+)
+target_link_libraries(
+    iocp_http_application
+    PUBLIC iocp_server_core
+    PRIVATE tomlplusplus::tomlplusplus
+)
+target_include_directories(
+    iocp_http_application
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
+add_executable(iocp_http_server apps/http_server/main.cpp)
+target_link_libraries(iocp_http_server PRIVATE iocp_http_application)
+
+iocp_enable_project_warnings(iocp_server_core)
+iocp_enable_project_warnings(iocp_echo_application)
+iocp_enable_project_warnings(iocp_echo_server)
+iocp_enable_project_warnings(iocp_echo_client)
+iocp_enable_project_warnings(iocp_http_application)
+iocp_enable_project_warnings(iocp_http_server)
+
+if(BUILD_TESTING)
+    add_executable(buffer_tests tests/buffer_tests.cpp)
+    target_link_libraries(buffer_tests PRIVATE iocp_server_core)
+
+    add_executable(execution_tests tests/execution_tests.cpp)
+    target_link_libraries(execution_tests PRIVATE iocp_server_core)
+
+    add_executable(m2_transport_tests tests/m2_transport_tests.cpp)
+    target_link_libraries(m2_transport_tests PRIVATE iocp_echo_application)
+
+    add_executable(protocol_tests tests/protocol_tests.cpp)
+    target_link_libraries(protocol_tests PRIVATE iocp_server_core)
+
+    add_executable(http_tests tests/http_tests.cpp)
+    target_link_libraries(http_tests PRIVATE iocp_server_core)
+
+    add_executable(http_server_tests tests/http_server_tests.cpp)
+    target_link_libraries(
+        http_server_tests
+        PRIVATE iocp_http_application
+    )
+
+    add_executable(
+        http_configuration_tests
+        tests/http_configuration_tests.cpp
+    )
+    target_link_libraries(
+        http_configuration_tests
+        PRIVATE iocp_http_application
+    )
+    target_compile_definitions(
+        http_configuration_tests
+        PRIVATE IOCP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+
+    add_executable(configuration_tests tests/configuration_tests.cpp)
+    target_link_libraries(
+        configuration_tests
+        PRIVATE iocp_echo_application
+    )
+
+    iocp_enable_project_warnings(buffer_tests)
+    iocp_enable_project_warnings(execution_tests)
+    iocp_enable_project_warnings(m2_transport_tests)
+    iocp_enable_project_warnings(protocol_tests)
+    iocp_enable_project_warnings(http_tests)
+    iocp_enable_project_warnings(http_server_tests)
+    iocp_enable_project_warnings(http_configuration_tests)
+    iocp_enable_project_warnings(configuration_tests)
+
+    add_test(NAME buffer_tests COMMAND buffer_tests)
+    add_test(NAME execution_tests COMMAND execution_tests)
+    add_test(NAME m2_transport_tests COMMAND m2_transport_tests)
+    add_test(NAME protocol_tests COMMAND protocol_tests)
+    add_test(NAME http_tests COMMAND http_tests)
+    add_test(NAME http_server_tests COMMAND http_server_tests)
+    add_test(
+        NAME http_configuration_tests
+        COMMAND http_configuration_tests
+    )
+    add_test(NAME configuration_tests COMMAND configuration_tests)
+endif()

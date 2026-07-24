@@ -1,0 +1,30 @@
+schema_version = 1
+
+[server]
+address = "127.0.0.1"
+port = 8080
+backlog = 128
+io_workers = 2
+application_workers = 2
+application_queue = 1024
+connection_queue = 128
+shutdown_timeout_ms = 10000
+
+[server.connection]
+receive_chunk_bytes = 4096
+send_queue_items = 64
+send_queue_bytes = 2097152
+send_gather_segments = 16
+send_gather_bytes = 65536
+outbound_batch_segments = 16
+
+[http]
+initial_buffer_bytes = 4096
+maximum_buffer_bytes = 2097152
+maximum_request_line_bytes = 8192
+maximum_header_bytes = 32768
+maximum_header_count = 64
+maximum_body_bytes = 1048576
+maximum_requests_per_connection = 100
+server_name = "iocp-http-runtime"
+maximum_response_header_bytes = 32768

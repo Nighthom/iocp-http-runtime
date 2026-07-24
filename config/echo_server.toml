@@ -1,0 +1,24 @@
+schema_version = 1
+
+[server]
+address = "127.0.0.1"
+port = 9000
+backlog = 128
+io_workers = 2
+shutdown_timeout_ms = 10000
+
+[server.connection]
+receive_chunk_bytes = 4096
+send_queue_items = 64
+send_queue_bytes = 1048576
+send_gather_segments = 16
+send_gather_bytes = 65536
+outbound_batch_segments = 16
+
+[logging]
+console = true
+file = true
+path = "logs/echo_server.log"
+append = true
+console_level = "trace"
+file_level = "trace"
