@@ -50,9 +50,24 @@ bool HttpRouter::Register(
 
     std::lock_guard lock(mutex_);
     MethodHandlers& handlers = routes_[std::move(path)];
-    HttpHandler* slot =
-        method == HttpMethod::Get ? &handlers.get : &handlers.post;
-    if (*slot)
+    HttpHandler* slot = nullptr;
+    if (method == HttpMethod::Get)
+    {
+        slot = &handlers.get;
+    }
+    else if (method == HttpMethod::Post)
+    {
+        slot = &handlers.post;
+    }
+    else if (method == HttpMethod::Put)
+    {
+        slot = &handlers.put;
+    }
+    else if (method == HttpMethod::Delete_)
+    {
+        slot = &handlers.delete_;
+    }
+    if (!slot || *slot)
     {
         return false;
     }
@@ -96,6 +111,14 @@ HttpDispatchStatus HttpRouter::Dispatch(
             else if (request.method == HttpMethod::Post)
             {
                 handler = route->second.post;
+            }
+            else if (request.method == HttpMethod::Put)
+            {
+                handler = route->second.put;
+            }
+            else if (request.method == HttpMethod::Delete_)
+            {
+                handler = route->second.delete_;
             }
 
             if (!handler)
@@ -149,6 +172,22 @@ HttpResponse HttpRouter::MethodNotAllowed(
             allow += ", ";
         }
         allow += "POST";
+    }
+    if (handlers.put)
+    {
+        if (!allow.empty())
+        {
+            allow += ", ";
+        }
+        allow += "PUT";
+    }
+    if (handlers.delete_)
+    {
+        if (!allow.empty())
+        {
+            allow += ", ";
+        }
+        allow += "DELETE";
     }
     response.headers.push_back({"Allow", std::move(allow)});
     return response;

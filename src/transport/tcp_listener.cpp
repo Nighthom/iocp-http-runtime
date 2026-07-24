@@ -122,6 +122,40 @@ TcpListener::TcpListener(
         throw WinsockError(::WSAGetLastError(), "WSASocketW(listener)");
     }
 
+    // SO_EXCLUSIVEADDRUSE: port 재사용 시 다른 프로세스의 bind 거부.
+    // SO_REUSEADDR: TIME_WAIT 상태의 port를 재사용 가능하게 함.
+    // exclusive_address_use가 우선하며, reuse_address는 보완 역할을 한다.
+    if (options_.socket.reuse_address)
+    {
+        constexpr BOOL reuse = TRUE;
+        if (::setsockopt(
+                listen_socket_.Get(),
+                SOL_SOCKET,
+                SO_REUSEADDR,
+                reinterpret_cast<const char*>(&reuse),
+                sizeof(reuse)) == SOCKET_ERROR)
+        {
+            throw WinsockError(
+                ::WSAGetLastError(), "setsockopt(SO_REUSEADDR)");
+        }
+    }
+
+    if (options_.socket.exclusive_address_use)
+    {
+        constexpr BOOL exclusive = TRUE;
+        if (::setsockopt(
+                listen_socket_.Get(),
+                SOL_SOCKET,
+                SO_EXCLUSIVEADDRUSE,
+                reinterpret_cast<const char*>(&exclusive),
+                sizeof(exclusive)) == SOCKET_ERROR)
+        {
+            throw WinsockError(
+                ::WSAGetLastError(),
+                "setsockopt(SO_EXCLUSIVEADDRUSE)");
+        }
+    }
+
     sockaddr_in endpoint{};
     endpoint.sin_family = AF_INET;
     endpoint.sin_port = ::htons(options_.port);

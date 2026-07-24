@@ -8,6 +8,23 @@ find_package(Threads REQUIRED)
 
 option(IOCP_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
 
+# 빌드 아웃풋 정리: bin/ lib/ test/
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+
+function(iocp_target_output_dirs target type)
+    if(type STREQUAL "app")
+        set_target_properties(${target} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    elseif(type STREQUAL "lib")
+        set_target_properties(${target} PROPERTIES
+            ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+    elseif(type STREQUAL "test")
+        set_target_properties(${target} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test")
+    endif()
+endfunction()
+
 FetchContent_Declare(
     tomlplusplus
     GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
@@ -52,6 +69,10 @@ add_library(iocp_server_core
     src/protocol/http/http_response_encoder.cpp
     src/protocol/http/http_router.cpp
     src/protocol/http/http_session.cpp
+    src/protocol/http/simple_template.cpp
+    src/protocol/http2/http2_frames.cpp
+    src/protocol/http2/http2_hpack.cpp
+    src/protocol/http2/http2_stream.cpp
     src/protocol/sample/length_prefixed_codec.cpp
     src/protocol/sample/length_prefixed_session.cpp
     src/protocol/sample/sample_dispatcher.cpp
@@ -108,12 +129,32 @@ target_include_directories(
 add_executable(iocp_http_server apps/http_server/main.cpp)
 target_link_libraries(iocp_http_server PRIVATE iocp_http_application)
 
+add_library(iocp_webapp
+    apps/webapp/webapp.cpp
+    apps/webapp/board_handlers.cpp
+)
+target_link_libraries(
+    iocp_webapp
+    PUBLIC iocp_server_core
+)
+target_include_directories(
+    iocp_webapp
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
+add_executable(iocp_webapp_server apps/webapp/main.cpp)
+target_link_libraries(iocp_webapp_server PRIVATE iocp_webapp)
+
 iocp_enable_project_warnings(iocp_server_core)
 iocp_enable_project_warnings(iocp_echo_application)
 iocp_enable_project_warnings(iocp_echo_server)
 iocp_enable_project_warnings(iocp_echo_client)
 iocp_enable_project_warnings(iocp_http_application)
 iocp_enable_project_warnings(iocp_http_server)
+iocp_enable_project_warnings(iocp_webapp)
+iocp_enable_project_warnings(iocp_webapp_server)
 
 if(BUILD_TESTING)
     add_executable(buffer_tests tests/buffer_tests.cpp)
@@ -130,6 +171,19 @@ if(BUILD_TESTING)
 
     add_executable(http_tests tests/http_tests.cpp)
     target_link_libraries(http_tests PRIVATE iocp_server_core)
+
+    add_executable(http_chunked_tests tests/http_chunked_tests.cpp)
+    target_link_libraries(http_chunked_tests PRIVATE iocp_server_core)
+
+    add_executable(http2_tests tests/http2_tests.cpp)
+    target_link_libraries(http2_tests PRIVATE iocp_server_core)
+
+    add_executable(webapp_handler_tests tests/webapp_handler_tests.cpp)
+    target_link_libraries(webapp_handler_tests PRIVATE iocp_webapp)
+    target_compile_definitions(
+        webapp_handler_tests
+        PRIVATE IOCP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
 
     add_executable(http_server_tests tests/http_server_tests.cpp)
     target_link_libraries(
@@ -161,6 +215,9 @@ if(BUILD_TESTING)
     iocp_enable_project_warnings(m2_transport_tests)
     iocp_enable_project_warnings(protocol_tests)
     iocp_enable_project_warnings(http_tests)
+    iocp_enable_project_warnings(http_chunked_tests)
+    iocp_enable_project_warnings(http2_tests)
+    iocp_enable_project_warnings(webapp_handler_tests)
     iocp_enable_project_warnings(http_server_tests)
     iocp_enable_project_warnings(http_configuration_tests)
     iocp_enable_project_warnings(configuration_tests)
@@ -170,10 +227,24 @@ if(BUILD_TESTING)
     add_test(NAME m2_transport_tests COMMAND m2_transport_tests)
     add_test(NAME protocol_tests COMMAND protocol_tests)
     add_test(NAME http_tests COMMAND http_tests)
+    add_test(NAME http_chunked_tests COMMAND http_chunked_tests)
+    add_test(NAME http2_tests COMMAND http2_tests)
+    add_test(NAME webapp_handler_tests COMMAND webapp_handler_tests)
     add_test(NAME http_server_tests COMMAND http_server_tests)
     add_test(
         NAME http_configuration_tests
         COMMAND http_configuration_tests
     )
     add_test(NAME configuration_tests COMMAND configuration_tests)
+
+    # test 실행 파일은 test/ 디렉터리로
+    set(TEST_TARGETS
+        buffer_tests execution_tests m2_transport_tests
+        protocol_tests http_tests http_chunked_tests
+        http2_tests webapp_handler_tests http_server_tests
+        http_configuration_tests configuration_tests)
+    foreach(target ${TEST_TARGETS})
+        set_target_properties(${target} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test")
+    endforeach()
 endif()

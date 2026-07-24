@@ -1,0 +1,116 @@
+/// @file webapp.h
+/// @brief 간단한 게시판 + 로그인 웹 애플리케이션 서버
+
+#pragma once
+
+#include "core/logging.h"
+#include "execution/thread_pool_executor.h"
+#include "platform/windows/winsock_runtime.h"
+#include "protocol/http/http_response_encoder.h"
+#include "protocol/http/http_router.h"
+#include "protocol/http/http_session.h"
+#include "runtime/io_context.h"
+#include "transport/connection_registry.h"
+#include "transport/tcp_connection.h"
+#include "transport/tcp_listener.h"
+#include "webapp/board_handlers.h"
+
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace iocp::server
+{
+
+struct WebAppOptions final
+{
+    std::size_t io_worker_count{2};
+    std::size_t application_worker_count{2};
+    std::size_t maximum_application_tasks{1024};
+    std::size_t maximum_connection_tasks{128};
+    std::string template_directory{"apps/webapp/templates"};
+    transport::ListenerOptions listener;
+    transport::ConnectionOptions connection;
+    protocol::http::HttpSessionOptions session;
+    std::chrono::milliseconds shutdown_timeout{
+        std::chrono::seconds{10}};
+};
+
+/// @brief template 기반 게시판 + 로그인 웹 애플리케이션 서버.
+///
+/// session/auth/board state는 WebAppServer가, HTML 렌더링은
+/// board_handlers가 담당한다. handler 함수는 socket/parser 없이
+/// 단위 테스트할 수 있다.
+class WebAppServer final
+{
+public:
+    static std::unique_ptr<WebAppServer> Create(
+        std::shared_ptr<core::Logger> logger,
+        WebAppOptions options = {});
+
+    ~WebAppServer();
+
+    WebAppServer(const WebAppServer&) = delete;
+    WebAppServer& operator=(const WebAppServer&) = delete;
+
+    bool Stop();
+    std::uint16_t LocalPort() const;
+
+    // test에서 접근 가능하도록 공개
+    std::string GenerateSessionToken() const;
+    bool ValidateSession(const std::string& token) const;
+    std::string GetUsername(const std::string& token) const;
+    void AddSession(const std::string& token,
+        const std::string& username);
+    std::vector<webapp::Post> GetPosts() const;
+    void AddPost(webapp::Post post);
+
+private:
+    WebAppServer(
+        std::shared_ptr<core::Logger> logger,
+        WebAppOptions options);
+
+    void RegisterRoutes();
+    void Start();
+    void OnAccepted(
+        platform::windows::SocketHandle socket) noexcept;
+
+    static std::string ExtractSessionId(
+        const protocol::http::HttpRequest& request);
+
+    std::shared_ptr<core::Logger> logger_;
+    WebAppOptions options_;
+    platform::windows::WinsockRuntime winsock_;
+    runtime::IoContext io_context_;
+    std::shared_ptr<execution::ThreadPoolContext>
+        application_context_;
+    std::shared_ptr<execution::ThreadPoolExecutor>
+        application_executor_;
+    std::shared_ptr<transport::ConnectionRegistry> registry_;
+    std::shared_ptr<protocol::http::HttpRouter> router_;
+    std::shared_ptr<transport::TcpListener> listener_;
+
+    mutable std::mutex state_mutex_;
+    std::mutex stop_mutex_;
+    enum class State { Created, Running, Stopping, Stopped };
+    State state_{State::Created};
+
+    mutable std::mutex auth_mutex_;
+    std::unordered_map<std::string, std::string> sessions_;
+    std::unordered_map<std::string, std::string> users_{
+        {"admin", "admin123"},
+        {"user", "pass123"},
+    };
+
+    mutable std::mutex board_mutex_;
+    std::vector<webapp::Post> posts_;
+    std::atomic<std::uint64_t> next_post_id_{1};
+};
+
+} // namespace iocp::server

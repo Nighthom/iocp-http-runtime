@@ -162,6 +162,7 @@ TcpConnection::TcpConnection(
           options.maximum_gather_bytes_per_operation),
       maximum_outbound_batch_segments_(
           options.maximum_outbound_batch_segments),
+      socket_options_(options.socket),
       send_queue_(
           options.maximum_send_queue_items,
           options.maximum_send_queue_bytes)
@@ -232,6 +233,10 @@ ConnectionId TcpConnection::Id() const noexcept
 
 bool TcpConnection::Start() noexcept
 {
+    // connected socket에 TCP_NODELAY, keepalive 등 native option 적용.
+    // 실패는 로깅만 하고 연결은 계속 진행한다.
+    ApplySocketOptions();
+
     int error = 0;
     bool remove_from_registry = false;
     try
@@ -861,6 +866,43 @@ ConnectionSnapshot TcpConnection::Snapshot() const
         received_bytes_,
         sent_bytes_,
     };
+}
+
+bool TcpConnection::ApplySocketOptions() noexcept
+{
+    if (!socket_)
+    {
+        return false;
+    }
+
+    const SOCKET s = socket_.Get();
+    bool result = true;
+
+    if (socket_options_.tcp_nodelay)
+    {
+        constexpr BOOL enable = TRUE;
+        if (::setsockopt(
+                s, IPPROTO_TCP, TCP_NODELAY,
+                reinterpret_cast<const char*>(&enable),
+                sizeof(enable)) == SOCKET_ERROR)
+        {
+            result = false;
+        }
+    }
+
+    if (socket_options_.keepalive_enabled)
+    {
+        constexpr BOOL enable = TRUE;
+        if (::setsockopt(
+                s, SOL_SOCKET, SO_KEEPALIVE,
+                reinterpret_cast<const char*>(&enable),
+                sizeof(enable)) == SOCKET_ERROR)
+        {
+            result = false;
+        }
+    }
+
+    return result;
 }
 
 std::string_view CloseReasonName(const CloseReason reason) noexcept

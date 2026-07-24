@@ -25,6 +25,7 @@ enum class HttpParseStatus : std::uint8_t
 {
     Incomplete,
     Complete,
+    HeadersComplete,
     Error,
 };
 
@@ -53,6 +54,7 @@ struct HttpParseResult final
     HttpParseError error{HttpParseError::None};
     std::size_t consumed_bytes{};
     HttpRequest request;
+    bool expect_continue{};
 };
 
 /// @brief HTTP/1.1 request line, headers, Content-Length body를 증분 해석한다.
@@ -76,6 +78,10 @@ private:
         RequestLine,
         Headers,
         Body,
+        ChunkHead,
+        ChunkBody,
+        ChunkTrailer,
+        ChunkEnd,
         Error,
     };
 
@@ -110,6 +116,11 @@ private:
     std::size_t header_bytes_{};
     std::size_t content_length_{};
     std::size_t body_offset_{};
+    std::size_t chunk_size_{};
+    std::size_t chunk_body_offset_{};
+    bool has_chunked_{};
+    bool expect_continue_{};
+    bool expect_continue_sent_{};
     HttpParseError last_error_{HttpParseError::None};
 };
 
