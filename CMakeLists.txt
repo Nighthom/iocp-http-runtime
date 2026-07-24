@@ -58,6 +58,7 @@ add_library(iocp_server_core
     src/buffer/receive_buffer.cpp
     src/buffer/ring_receive_buffer.cpp
     src/core/logging.cpp
+    src/core/config_utils.cpp
     src/execution/iocp_executor.cpp
     src/execution/manual_executor.cpp
     src/execution/serial_executor.cpp
@@ -85,7 +86,7 @@ add_library(iocp_server_core
 
 target_compile_features(iocp_server_core PUBLIC cxx_std_17)
 target_include_directories(iocp_server_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(iocp_server_core PUBLIC Threads::Threads ws2_32)
+target_link_libraries(iocp_server_core PUBLIC Threads::Threads ws2_32 tomlplusplus::tomlplusplus)
 
 add_library(iocp_echo_application
     apps/echo_server/configuration.cpp

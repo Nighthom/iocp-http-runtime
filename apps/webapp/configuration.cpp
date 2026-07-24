@@ -2,19 +2,19 @@
 
 #include "webapp/configuration.h"
 
+#include "core/config_utils.h"
+
 #include <toml++/toml.hpp>
 
-#ifndef IOCP_SOURCE_DIR
-#define IOCP_SOURCE_DIR "."
-#endif
-
-#include <charconv>
 #include <climits>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <string>
-#include <utility>
+
+#ifndef IOCP_SOURCE_DIR
+#define IOCP_SOURCE_DIR "."
+#endif
 
 namespace iocp::application
 {
@@ -24,31 +24,13 @@ namespace
 
 constexpr std::int64_t kSchemaVersion = 1;
 
-std::uint64_t ParseUnsigned(
-    const std::string_view name,
-    const std::string_view value,
-    const std::uint64_t maximum,
-    const bool allow_zero)
-{
-    std::uint64_t parsed = 0;
-    const auto result = std::from_chars(
-        value.data(), value.data() + value.size(), parsed);
-    if (value.empty() || result.ec != std::errc{} ||
-        result.ptr != value.data() + value.size() ||
-        (!allow_zero && parsed == 0) || parsed > maximum)
-    {
-        throw std::invalid_argument(
-            std::string{name} + " is outside its valid range: " +
-            std::string{value});
-    }
-    return parsed;
-}
-
 void ApplyOption(
     WebAppApplicationOptions& options,
     const std::string_view name,
     const std::string_view value)
 {
+    using iocp::core::ParseUnsigned;
+
     if (name == "address")
     {
         if (value.empty())
@@ -66,32 +48,13 @@ void ApplyOption(
             ParseUnsigned(name, value, INT_MAX, false));
     }
     else if (name == "io-workers")
-    {
-        options.server.io_worker_count = static_cast<std::size_t>(
-            ParseUnsigned(name, value,
-                std::numeric_limits<std::size_t>::max(), false));
-    }
+        options.server.io_worker_count = static_cast<std::size_t>(ParseUnsigned(name, value, SIZE_MAX, false));
     else if (name == "application-workers")
-    {
-        options.server.application_worker_count =
-            static_cast<std::size_t>(
-                ParseUnsigned(name, value,
-                    std::numeric_limits<std::size_t>::max(), false));
-    }
+        options.server.application_worker_count = static_cast<std::size_t>(ParseUnsigned(name, value, SIZE_MAX, false));
     else if (name == "application-queue")
-    {
-        options.server.maximum_application_tasks =
-            static_cast<std::size_t>(
-                ParseUnsigned(name, value,
-                    std::numeric_limits<std::size_t>::max(), false));
-    }
+        options.server.maximum_application_tasks = static_cast<std::size_t>(ParseUnsigned(name, value, SIZE_MAX, false));
     else if (name == "connection-queue")
-    {
-        options.server.maximum_connection_tasks =
-            static_cast<std::size_t>(
-                ParseUnsigned(name, value,
-                    std::numeric_limits<std::size_t>::max(), false));
-    }
+        options.server.maximum_connection_tasks = static_cast<std::size_t>(ParseUnsigned(name, value, SIZE_MAX, false));
     else if (name == "home-dir")
     {
         if (value.empty())
@@ -101,69 +64,51 @@ void ApplyOption(
     else if (name == "shutdown-timeout-ms")
     {
         using Rep = std::chrono::milliseconds::rep;
-        const auto maximum = static_cast<std::uint64_t>(
-            std::chrono::milliseconds::max().count());
-        options.server.shutdown_timeout =
-            std::chrono::milliseconds{static_cast<Rep>(
-                ParseUnsigned(name, value, maximum, false))};
+        const auto maximum = static_cast<std::uint64_t>(std::chrono::milliseconds::max().count());
+        options.server.shutdown_timeout = std::chrono::milliseconds{static_cast<Rep>(ParseUnsigned(name, value, maximum, false))};
     }
     else
-    {
-        throw std::invalid_argument(
-            "unknown webapp option: " + std::string{name});
-    }
+        throw std::invalid_argument("unknown webapp option: " + std::string{name});
 }
 
 void ApplyToml(
     WebAppApplicationOptions& options,
     const std::filesystem::path& path)
 {
+    using iocp::core::OptionalTable;
+    using iocp::core::ReadTomlInt;
+    using iocp::core::ReadTomlStr;
+    using iocp::core::RejectUnknownKeys;
+    using iocp::core::TomlKeyToCli;
+
     toml::table root;
-    try
-    {
-        root = toml::parse_file(path.u8string());
-    }
+    try { root = toml::parse_file(path.u8string()); }
     catch (const toml::parse_error& error)
     {
-        throw std::invalid_argument(
-            "invalid webapp TOML: " +
-            std::string{error.description()});
+        throw std::invalid_argument("invalid webapp TOML: " + std::string{error.description()});
     }
 
     if (const toml::node* node = root.get("schema_version"))
     {
         const auto version = node->value_exact<std::int64_t>();
         if (!version || *version != kSchemaVersion)
-            throw std::invalid_argument(
-                "unsupported webapp TOML schema_version");
+            throw std::invalid_argument("unsupported webapp TOML schema_version");
     }
 
-    const toml::table* server = root.get("server")->as_table();
+    const toml::table* server = OptionalTable(root, "server");
     if (!server) return;
 
-    auto to_cli = [](const char* key) {
-        std::string s(key);
-        for (auto& c : s) if (c == '_') c = '-';
-        return s;
-    };
+    RejectUnknownKeys(*server, {"address","port","backlog","io_workers","application_workers","application_queue","connection_queue","shutdown_timeout_ms","home_dir"});
+
     auto apply_int = [&](const char* key) {
-        const auto* node = server->get(key);
-        if (!node) return;
-        const auto val = node->value_exact<std::int64_t>();
-        if (!val || *val < 0)
-            throw std::invalid_argument(
-                std::string{"server."} + key +
-                " must be a non-negative integer");
-        ApplyOption(options, to_cli(key), std::to_string(*val));
+        const auto val = ReadTomlInt(*server, key);
+        if (val && *val >= 0)
+            ApplyOption(options, TomlKeyToCli(key), std::to_string(*val));
     };
     auto apply_str = [&](const char* key) {
-        const auto* node = server->get(key);
-        if (!node) return;
-        const auto val = node->value_exact<std::string>();
-        if (!val)
-            throw std::invalid_argument(
-                std::string{"server."} + key + " must be a string");
-        ApplyOption(options, to_cli(key), *val);
+        const auto val = ReadTomlStr(*server, key);
+        if (val)
+            ApplyOption(options, TomlKeyToCli(key), *val);
     };
 
     apply_int("port");
@@ -177,112 +122,40 @@ void ApplyToml(
     apply_str("home_dir");
 }
 
-std::optional<std::filesystem::path> FindConfigFile(
-    const std::vector<std::string_view>& arguments)
-{
-    for (std::size_t index = 0; index < arguments.size(); ++index)
-    {
-        const std::string_view arg = arguments[index];
-        std::string_view value;
-        if (arg == "--config")
-        {
-            if (++index >= arguments.size())
-                throw std::invalid_argument("--config requires a path");
-            value = arguments[index];
-        }
-        else if (arg.rfind("--config=", 0) == 0)
-        {
-            value = arg.substr(9);
-        }
-        else continue;
-
-        if (value.empty())
-            throw std::invalid_argument(
-                "--config must specify one non-empty path");
-        return std::filesystem::path{value};
-    }
-    return std::nullopt;
-}
-
-void ApplyCommandLine(
+void ApplyCli(
     WebAppApplicationOptions& options,
-    const std::vector<std::string_view>& arguments)
+    const iocp::core::CliParser& cli)
 {
-    bool positional_port_seen = false;
-    for (std::size_t index = 0; index < arguments.size(); ++index)
-    {
-        const std::string_view arg = arguments[index];
-        if (arg == "--help" || arg == "-h")
-        {
-            options.show_help = true;
-            continue;
-        }
-        if (arg == "--config")
-        {
-            ++index;
-            continue;
-        }
-        if (arg.rfind("--config=", 0) == 0) continue;
+    if (const auto val = cli.Option("port"); !val.empty()) ApplyOption(options, "port", val);
+    if (const auto val = cli.Option("address"); !val.empty()) ApplyOption(options, "address", val);
+    if (const auto val = cli.Option("backlog"); !val.empty()) ApplyOption(options, "backlog", val);
+    if (const auto val = cli.Option("io-workers"); !val.empty()) ApplyOption(options, "io-workers", val);
+    if (const auto val = cli.Option("application-workers"); !val.empty()) ApplyOption(options, "application-workers", val);
+    if (const auto val = cli.Option("application-queue"); !val.empty()) ApplyOption(options, "application-queue", val);
+    if (const auto val = cli.Option("connection-queue"); !val.empty()) ApplyOption(options, "connection-queue", val);
+    if (const auto val = cli.Option("home-dir"); !val.empty()) ApplyOption(options, "home-dir", val);
+    if (const auto val = cli.Option("shutdown-timeout-ms"); !val.empty()) ApplyOption(options, "shutdown-timeout-ms", val);
 
-        if (arg.rfind("--", 0) != 0)
-        {
-            if (positional_port_seen)
-                throw std::invalid_argument(
-                    "only one positional port may be specified");
-            ApplyOption(options, "port", arg);
-            positional_port_seen = true;
-            continue;
-        }
-
-        const std::string_view body = arg.substr(2);
-        const std::size_t sep = body.find('=');
-        std::string_view name = body;
-        std::string_view value;
-        if (sep != std::string_view::npos)
-        {
-            name = body.substr(0, sep);
-            value = body.substr(sep + 1);
-        }
-        else
-        {
-            if (++index >= arguments.size())
-                throw std::invalid_argument(
-                    "--" + std::string{name} + " requires a value");
-            value = arguments[index];
-        }
-        ApplyOption(options, name, value);
-    }
+    if (!cli.Positional().empty())
+        ApplyOption(options, "port", cli.Positional()[0]);
 }
 
 void Validate(WebAppApplicationOptions& options)
 {
     auto& s = options.server;
-    if (s.io_worker_count == 0 ||
-        s.application_worker_count == 0 ||
-        s.maximum_application_tasks == 0 ||
-        s.maximum_connection_tasks == 0 ||
+    if (s.io_worker_count == 0 || s.application_worker_count == 0 ||
+        s.maximum_application_tasks == 0 || s.maximum_connection_tasks == 0 ||
         s.listener.backlog <= 0)
-    {
-        throw std::invalid_argument(
-            "webapp worker, queue, and listener values must be positive");
-    }
+        throw std::invalid_argument("webapp worker, queue, and listener values must be positive");
+
     if (s.home_directory.empty())
-    {
-        throw std::invalid_argument(
-            "home_directory must not be empty");
-    }
-    s.home_directory =
-        std::filesystem::absolute(s.home_directory).string();
+        throw std::invalid_argument("home_directory must not be empty");
+    s.home_directory = std::filesystem::absolute(s.home_directory).string();
     if (!std::filesystem::exists(s.home_directory))
-    {
-        throw std::invalid_argument(
-            "home directory not found: " + s.home_directory);
-    }
+        throw std::invalid_argument("home directory not found: " + s.home_directory);
+
     if (s.shutdown_timeout <= std::chrono::milliseconds::zero())
-    {
-        throw std::invalid_argument(
-            "webapp shutdown timeout must be positive");
-    }
+        throw std::invalid_argument("webapp shutdown timeout must be positive");
 }
 
 } // namespace
@@ -290,21 +163,29 @@ void Validate(WebAppApplicationOptions& options)
 WebAppApplicationOptions::WebAppApplicationOptions()
 {
     server.listener.port = 8080;
-    server.home_directory =
-        (std::filesystem::path(IOCP_SOURCE_DIR) / "apps" / "webapp" / "templates").string();
+    server.home_directory = (std::filesystem::path(IOCP_SOURCE_DIR) / "apps" / "webapp" / "templates").string();
 }
 
 WebAppApplicationOptions LoadWebAppOptions(
     const std::vector<std::string_view>& arguments)
 {
+    using iocp::core::CliParser;
+    using iocp::core::FindConfigFile;
+
+    const CliParser cli(arguments);
     WebAppApplicationOptions options;
-    options.config_file = FindConfigFile(arguments);
-    if (options.config_file)
+
+    if (cli.show_help)
     {
-        ApplyToml(options, *options.config_file);
+        options.show_help = true;
+        return options;
     }
-    ApplyCommandLine(options, arguments);
+
+    const auto config = FindConfigFile(cli, "webapp.toml");
+    if (config) ApplyToml(options, *config);
+    ApplyCli(options, cli);
     Validate(options);
+
     return options;
 }
 
