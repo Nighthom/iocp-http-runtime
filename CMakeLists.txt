@@ -52,6 +52,7 @@ add_library(iocp_server_core
     src/protocol/http/http_response_encoder.cpp
     src/protocol/http/http_router.cpp
     src/protocol/http/http_session.cpp
+    src/protocol/http/simple_template.cpp
     src/protocol/http2/http2_frames.cpp
     src/protocol/http2/http2_hpack.cpp
     src/protocol/http2/http2_stream.cpp
@@ -113,6 +114,7 @@ target_link_libraries(iocp_http_server PRIVATE iocp_http_application)
 
 add_library(iocp_webapp
     apps/webapp/webapp.cpp
+    apps/webapp/board_handlers.cpp
 )
 target_link_libraries(
     iocp_webapp
@@ -159,6 +161,13 @@ if(BUILD_TESTING)
     add_executable(http2_tests tests/http2_tests.cpp)
     target_link_libraries(http2_tests PRIVATE iocp_server_core)
 
+    add_executable(webapp_handler_tests tests/webapp_handler_tests.cpp)
+    target_link_libraries(webapp_handler_tests PRIVATE iocp_webapp)
+    target_compile_definitions(
+        webapp_handler_tests
+        PRIVATE IOCP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+
     add_executable(http_server_tests tests/http_server_tests.cpp)
     target_link_libraries(
         http_server_tests
@@ -191,6 +200,7 @@ if(BUILD_TESTING)
     iocp_enable_project_warnings(http_tests)
     iocp_enable_project_warnings(http_chunked_tests)
     iocp_enable_project_warnings(http2_tests)
+    iocp_enable_project_warnings(webapp_handler_tests)
     iocp_enable_project_warnings(http_server_tests)
     iocp_enable_project_warnings(http_configuration_tests)
     iocp_enable_project_warnings(configuration_tests)
@@ -202,6 +212,7 @@ if(BUILD_TESTING)
     add_test(NAME http_tests COMMAND http_tests)
     add_test(NAME http_chunked_tests COMMAND http_chunked_tests)
     add_test(NAME http2_tests COMMAND http2_tests)
+    add_test(NAME webapp_handler_tests COMMAND webapp_handler_tests)
     add_test(NAME http_server_tests COMMAND http_server_tests)
     add_test(
         NAME http_configuration_tests
