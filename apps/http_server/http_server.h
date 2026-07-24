@@ -31,6 +31,7 @@ struct HttpServerOptions final
     std::size_t application_worker_count{2};
     std::size_t maximum_application_tasks{1024};
     std::size_t maximum_connection_tasks{128};
+    bool enable_http2{true};
     transport::ListenerOptions listener;
     transport::ConnectionOptions connection;
     protocol::http::HttpSessionOptions session;

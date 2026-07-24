@@ -191,7 +191,7 @@ void TestParserErrorsAndLimits()
         HttpParseError::InvalidContentLength);
     ExpectError(
         "POST / HTTP/1.1\r\nHost: a\r\n"
-        "Transfer-Encoding: chunked\r\n\r\n",
+        "Transfer-Encoding: something-unsupported\r\n\r\n",
         HttpParseError::UnsupportedTransferEncoding);
     ExpectError(
         "GET / HTTP/1.0\r\nHost: a\r\n\r\n",
@@ -222,11 +222,11 @@ void TestParserErrorsAndLimits()
         body_options);
 
     const auto unsupported = ParseWhole(
-        "DELETE / HTTP/1.1\r\nHost: a\r\n\r\n");
+        "BOGUS / HTTP/1.1\r\nHost: a\r\n\r\n");
     Check(
         unsupported.status == HttpParseStatus::Complete &&
             unsupported.request.method == HttpMethod::Unsupported &&
-            unsupported.request.method_text == "DELETE",
+            unsupported.request.method_text == "BOGUS",
         "syntactically valid unsupported method did not reach routing");
 }
 

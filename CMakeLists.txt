@@ -52,6 +52,9 @@ add_library(iocp_server_core
     src/protocol/http/http_response_encoder.cpp
     src/protocol/http/http_router.cpp
     src/protocol/http/http_session.cpp
+    src/protocol/http2/http2_frames.cpp
+    src/protocol/http2/http2_hpack.cpp
+    src/protocol/http2/http2_stream.cpp
     src/protocol/sample/length_prefixed_codec.cpp
     src/protocol/sample/length_prefixed_session.cpp
     src/protocol/sample/sample_dispatcher.cpp
@@ -108,12 +111,31 @@ target_include_directories(
 add_executable(iocp_http_server apps/http_server/main.cpp)
 target_link_libraries(iocp_http_server PRIVATE iocp_http_application)
 
+add_library(iocp_webapp
+    apps/webapp/webapp.cpp
+)
+target_link_libraries(
+    iocp_webapp
+    PUBLIC iocp_server_core
+)
+target_include_directories(
+    iocp_webapp
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
+add_executable(iocp_webapp_server apps/webapp/main.cpp)
+target_link_libraries(iocp_webapp_server PRIVATE iocp_webapp)
+
 iocp_enable_project_warnings(iocp_server_core)
 iocp_enable_project_warnings(iocp_echo_application)
 iocp_enable_project_warnings(iocp_echo_server)
 iocp_enable_project_warnings(iocp_echo_client)
 iocp_enable_project_warnings(iocp_http_application)
 iocp_enable_project_warnings(iocp_http_server)
+iocp_enable_project_warnings(iocp_webapp)
+iocp_enable_project_warnings(iocp_webapp_server)
 
 if(BUILD_TESTING)
     add_executable(buffer_tests tests/buffer_tests.cpp)
@@ -130,6 +152,12 @@ if(BUILD_TESTING)
 
     add_executable(http_tests tests/http_tests.cpp)
     target_link_libraries(http_tests PRIVATE iocp_server_core)
+
+    add_executable(http_chunked_tests tests/http_chunked_tests.cpp)
+    target_link_libraries(http_chunked_tests PRIVATE iocp_server_core)
+
+    add_executable(http2_tests tests/http2_tests.cpp)
+    target_link_libraries(http2_tests PRIVATE iocp_server_core)
 
     add_executable(http_server_tests tests/http_server_tests.cpp)
     target_link_libraries(
@@ -161,6 +189,8 @@ if(BUILD_TESTING)
     iocp_enable_project_warnings(m2_transport_tests)
     iocp_enable_project_warnings(protocol_tests)
     iocp_enable_project_warnings(http_tests)
+    iocp_enable_project_warnings(http_chunked_tests)
+    iocp_enable_project_warnings(http2_tests)
     iocp_enable_project_warnings(http_server_tests)
     iocp_enable_project_warnings(http_configuration_tests)
     iocp_enable_project_warnings(configuration_tests)
@@ -170,6 +200,8 @@ if(BUILD_TESTING)
     add_test(NAME m2_transport_tests COMMAND m2_transport_tests)
     add_test(NAME protocol_tests COMMAND protocol_tests)
     add_test(NAME http_tests COMMAND http_tests)
+    add_test(NAME http_chunked_tests COMMAND http_chunked_tests)
+    add_test(NAME http2_tests COMMAND http2_tests)
     add_test(NAME http_server_tests COMMAND http_server_tests)
     add_test(
         NAME http_configuration_tests

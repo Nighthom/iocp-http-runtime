@@ -32,6 +32,12 @@ public:
         std::shared_ptr<execution::IExecutor> executor,
         HttpResponseSender response_sender,
         HttpSessionOptions options = {});
+    HttpSession(
+        std::shared_ptr<HttpRouter> router,
+        std::shared_ptr<execution::IExecutor> executor,
+        HttpResponseSender response_sender,
+        std::uint64_t connection_id,
+        HttpSessionOptions options = {});
 
     ProtocolFeedResult Feed(buffer::ByteView bytes) override;
 
@@ -39,6 +45,7 @@ public:
     std::size_t BufferedBytes() const noexcept;
     HttpParseError LastParseError() const noexcept;
     std::size_t RequestsDispatched() const noexcept;
+    std::uint64_t ConnectionId() const noexcept;
 
 private:
     ProtocolFeedStatus PostErrorResponse(
@@ -55,6 +62,8 @@ private:
     buffer::RingReceiveBuffer receive_buffer_;
     HttpRequestParser parser_;
     const std::size_t maximum_requests_per_connection_;
+    std::uint64_t connection_id_{};
+    std::uint64_t next_request_id_{1};
     bool stopped_{};
     HttpParseError last_parse_error_{HttpParseError::None};
     std::size_t requests_dispatched_{};

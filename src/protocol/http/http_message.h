@@ -42,6 +42,8 @@ struct HttpRequest final
     std::vector<HttpHeader> headers;
     std::vector<std::byte> body;
     bool keep_alive{true};
+    std::uint64_t request_id{};
+    std::uint64_t connection_id{};
 
     std::optional<std::string_view> Header(
         std::string_view name) const noexcept;

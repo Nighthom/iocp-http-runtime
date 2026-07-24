@@ -13,6 +13,21 @@ HttpSession::HttpSession(
     std::shared_ptr<execution::IExecutor> executor,
     HttpResponseSender response_sender,
     const HttpSessionOptions options)
+    : HttpSession(
+          std::move(router),
+          std::move(executor),
+          std::move(response_sender),
+          0,
+          options)
+{
+}
+
+HttpSession::HttpSession(
+    std::shared_ptr<HttpRouter> router,
+    std::shared_ptr<execution::IExecutor> executor,
+    HttpResponseSender response_sender,
+    const std::uint64_t connection_id,
+    const HttpSessionOptions options)
     : router_(std::move(router)),
       executor_(std::move(executor)),
       response_sender_(std::move(response_sender)),
@@ -21,7 +36,8 @@ HttpSession::HttpSession(
           options.maximum_buffer_bytes),
       parser_(options.parser),
       maximum_requests_per_connection_(
-          options.maximum_requests_per_connection)
+          options.maximum_requests_per_connection),
+      connection_id_(connection_id)
 {
     if (!router_)
     {
@@ -79,6 +95,18 @@ ProtocolFeedResult HttpSession::Feed(
     {
         HttpParseResult parsed =
             parser_.Parse(receive_buffer_.ReadableSequence());
+
+        if (parsed.status == HttpParseStatus::HeadersComplete)
+        {
+            if (parsed.expect_continue)
+            {
+                const auto continue_response = MakeTextResponse(
+                    100, {}, "text/plain");
+                response_sender_(continue_response);
+            }
+            continue;
+        }
+
         if (parsed.status == HttpParseStatus::Incomplete)
         {
             return ProtocolFeedResult{
@@ -106,6 +134,8 @@ ProtocolFeedResult HttpSession::Feed(
 
         receive_buffer_.Consume(parsed.consumed_bytes);
         ++requests_dispatched_;
+        parsed.request.request_id = next_request_id_++;
+        parsed.request.connection_id = connection_id_;
         const bool close_connection =
             !parsed.request.keep_alive ||
             requests_dispatched_ >=
@@ -157,6 +187,11 @@ HttpParseError HttpSession::LastParseError() const noexcept
 std::size_t HttpSession::RequestsDispatched() const noexcept
 {
     return requests_dispatched_;
+}
+
+std::uint64_t HttpSession::ConnectionId() const noexcept
+{
+    return connection_id_;
 }
 
 ProtocolFeedStatus HttpSession::PostErrorResponse(

@@ -134,6 +134,56 @@ bool ParseDecimalSize(
     return true;
 }
 
+bool ParseHexSize(
+    const std::string_view value,
+    std::size_t& output) noexcept
+{
+    if (value.empty())
+    {
+        return false;
+    }
+
+    std::size_t parsed = 0;
+    for (const char character : value)
+    {
+        if (parsed >
+            std::numeric_limits<std::size_t>::max() / 16)
+        {
+            return false;
+        }
+        const auto byte = static_cast<unsigned char>(character);
+        if (byte >= '0' && byte <= '9')
+        {
+            parsed = parsed * 16 + static_cast<std::size_t>(byte - '0');
+        }
+        else if (byte >= 'a' && byte <= 'f')
+        {
+            parsed = parsed * 16 + static_cast<std::size_t>(byte - 'a' + 10);
+        }
+        else if (byte >= 'A' && byte <= 'F')
+        {
+            parsed = parsed * 16 + static_cast<std::size_t>(byte - 'A' + 10);
+        }
+        else
+        {
+            return false;
+        }
+    }
+    output = parsed;
+    return true;
+}
+
+std::string_view SkipChunkExtension(
+    const std::string_view value) noexcept
+{
+    const auto semi = value.find(';');
+    if (semi == std::string_view::npos)
+    {
+        return value;
+    }
+    return value.substr(0, semi);
+}
+
 } // namespace
 
 HttpRequestParser::HttpRequestParser(
@@ -241,6 +291,32 @@ HttpParseResult HttpRequestParser::Parse(
                     };
                 }
                 body_offset_ = scan_offset_;
+                if (expect_continue_ && !expect_continue_sent_)
+                {
+                    expect_continue_sent_ = true;
+                    if (has_chunked_)
+                    {
+                        state_ = State::ChunkHead;
+                    }
+                    else if (content_length_ == 0)
+                    {
+                        return Complete(input);
+                    }
+                    else
+                    {
+                        state_ = State::Body;
+                    }
+                    HttpParseResult result;
+                    result.status = HttpParseStatus::HeadersComplete;
+                    result.consumed_bytes = scan_offset_;
+                    result.expect_continue = true;
+                    return result;
+                }
+                if (has_chunked_)
+                {
+                    state_ = State::ChunkHead;
+                    continue;
+                }
                 if (content_length_ == 0)
                 {
                     return Complete(input);
@@ -279,6 +355,89 @@ HttpParseResult HttpRequestParser::Parse(
             }
             return Complete(input);
         }
+
+        if (state_ == State::ChunkHead)
+        {
+            LineResult line = ReadLine(input, 256);
+            if (line.status == LineStatus::Incomplete)
+            {
+                return {};
+            }
+            if (line.status == LineStatus::Error)
+            {
+                return Fail(HttpParseError::InvalidLineEnding);
+            }
+
+            std::string_view hex_part = SkipChunkExtension(line.value);
+            if (!ParseHexSize(hex_part, chunk_size_))
+            {
+                return Fail(HttpParseError::InvalidContentLength);
+            }
+
+            chunk_body_offset_ = scan_offset_;
+            if (chunk_size_ == 0)
+            {
+                state_ = State::ChunkTrailer;
+                continue;
+            }
+            state_ = State::ChunkBody;
+            continue;
+        }
+
+        if (state_ == State::ChunkBody)
+        {
+            const std::size_t chunk_end =
+                chunk_body_offset_ + chunk_size_ + 2;
+            if (input.Size() < chunk_end)
+            {
+                return {};
+            }
+
+            if (request_.body.size() + chunk_size_ >
+                options_.maximum_body_bytes)
+            {
+                return Fail(HttpParseError::BodyTooLarge);
+            }
+
+            const std::size_t body_start =
+                request_.body.size();
+            request_.body.resize(body_start + chunk_size_);
+            input.CopyTo(
+                chunk_body_offset_,
+                buffer::MutableByteView(
+                    request_.body.data() + body_start,
+                    chunk_size_));
+
+            scan_offset_ = chunk_end;
+            line_start_ = scan_offset_;
+            state_ = State::ChunkHead;
+            continue;
+        }
+
+        if (state_ == State::ChunkTrailer)
+        {
+            LineResult line =
+                ReadLine(input, options_.maximum_header_bytes);
+            if (line.status == LineStatus::Incomplete)
+            {
+                return {};
+            }
+            if (line.status == LineStatus::Error)
+            {
+                return Fail(HttpParseError::InvalidLineEnding);
+            }
+            if (line.value.empty())
+            {
+                state_ = State::ChunkEnd;
+                continue;
+            }
+            continue;
+        }
+
+        if (state_ == State::ChunkEnd)
+        {
+            return Complete(input);
+        }
     }
 }
 
@@ -291,6 +450,11 @@ void HttpRequestParser::Reset() noexcept
     header_bytes_ = 0;
     content_length_ = 0;
     body_offset_ = 0;
+    chunk_size_ = 0;
+    chunk_body_offset_ = 0;
+    has_chunked_ = false;
+    expect_continue_ = false;
+    expect_continue_sent_ = false;
     last_error_ = HttpParseError::None;
 }
 
@@ -492,14 +656,29 @@ bool HttpRequestParser::FinalizeHeaders()
         }
         else if (header.name == "transfer-encoding")
         {
-            Fail(HttpParseError::UnsupportedTransferEncoding);
-            return false;
+            if (content_length_count > 0)
+            {
+                Fail(HttpParseError::InvalidContentLength);
+                return false;
+            }
+            const auto trimmed = TrimOptionalWhitespace(header.value);
+            if (!HeaderContainsToken(trimmed, "chunked"))
+            {
+                Fail(HttpParseError::UnsupportedTransferEncoding);
+                return false;
+            }
+            has_chunked_ = true;
         }
         else if (header.name == "connection")
         {
             connection_close =
                 connection_close ||
                 HeaderContainsToken(header.value, "close");
+        }
+        else if (header.name == "expect")
+        {
+            expect_continue_ =
+                HeaderContainsToken(header.value, "100-continue");
         }
     }
 
@@ -531,7 +710,7 @@ bool HttpRequestParser::FinalizeHeaders()
 HttpParseResult HttpRequestParser::Complete(
     const buffer::BufferSequence input)
 {
-    if (content_length_ != 0)
+    if (content_length_ != 0 && !has_chunked_)
     {
         request_.body.resize(content_length_);
         input.CopyTo(
@@ -542,7 +721,7 @@ HttpParseResult HttpRequestParser::Complete(
     }
 
     const std::size_t consumed_bytes =
-        body_offset_ + content_length_;
+        has_chunked_ ? scan_offset_ : body_offset_ + content_length_;
     HttpRequest request = std::move(request_);
     Reset();
     return HttpParseResult{
