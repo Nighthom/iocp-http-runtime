@@ -70,6 +70,15 @@ struct ConnectionSnapshot final
     std::uint64_t sent_bytes{};
 };
 
+/// @brief connected socket의 native option이다.
+struct ConnectedSocketOptions final
+{
+    bool tcp_nodelay{true};
+    bool keepalive_enabled{};
+    std::uint32_t keepalive_idle_sec{7200};
+    std::uint32_t keepalive_interval_sec{75};
+};
+
 struct ConnectionOptions final
 {
     std::size_t maximum_send_queue_items{64};
@@ -78,6 +87,7 @@ struct ConnectionOptions final
     std::size_t maximum_gather_segments_per_operation{16};
     std::size_t maximum_gather_bytes_per_operation{64 * 1024};
     std::size_t maximum_outbound_batch_segments{16};
+    ConnectedSocketOptions socket;
 };
 
 enum class SendStatus
@@ -176,6 +186,7 @@ private:
     bool MoveToClosedIfDrainedLocked() noexcept;
     void RemoveFromRegistry() noexcept;
     void LogClose(CloseReason reason) noexcept;
+    bool ApplySocketOptions() noexcept;
 
     const ConnectionId id_;
     platform::windows::SocketHandle socket_;
@@ -186,6 +197,7 @@ private:
     const std::size_t maximum_gather_segments_per_operation_;
     const std::size_t maximum_gather_bytes_per_operation_;
     const std::size_t maximum_outbound_batch_segments_;
+    const ConnectedSocketOptions socket_options_;
 
     mutable std::mutex mutex_;
     std::condition_variable closed_condition_;

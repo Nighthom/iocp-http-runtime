@@ -32,12 +32,20 @@
 namespace iocp::transport
 {
 
+/// @brief listener socket의 native option이다.
+struct ListenerSocketOptions final
+{
+    bool exclusive_address_use{true};
+    bool reuse_address{false};
+};
+
 /// @brief M2 listener가 bind할 IPv4 endpoint와 backlog 설정이다.
 struct ListenerOptions final
 {
     std::string address{"127.0.0.1"};
     std::uint16_t port{0};
     int backlog{SOMAXCONN};
+    ListenerSocketOptions socket;
 };
 
 enum class ListenerState
