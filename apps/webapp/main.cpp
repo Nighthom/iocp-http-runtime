@@ -5,11 +5,18 @@
 
 #include "core/logging.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+
 #include <iostream>
 #include <string>
 
 int main(const int argc, char* argv[])
 {
+    ::SetConsoleOutputCP(CP_UTF8);
+
     std::uint16_t port = 8080;
 
     for (int i = 1; i < argc; ++i)
