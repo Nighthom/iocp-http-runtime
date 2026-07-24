@@ -6,6 +6,11 @@
 
 #include <toml++/toml.hpp>
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+
 #include <climits>
 #include <cstdint>
 #include <limits>
@@ -150,12 +155,33 @@ void Validate(WebAppApplicationOptions& options)
 
     if (s.home_directory.empty())
         throw std::invalid_argument("home_directory must not be empty");
-    s.home_directory = std::filesystem::absolute(s.home_directory).string();
-    if (!std::filesystem::exists(s.home_directory))
-        throw std::invalid_argument("home directory not found: " + s.home_directory);
 
-    if (s.shutdown_timeout <= std::chrono::milliseconds::zero())
-        throw std::invalid_argument("webapp shutdown timeout must be positive");
+    s.home_directory = std::filesystem::absolute(s.home_directory).string();
+
+    // 개발 빌드(IOCP_SOURCE_DIR)나 설치 배포(exe 상대) 모두 지원
+    if (std::filesystem::exists(s.home_directory))
+        return;
+
+    // IOCP_SOURCE_DIR가 없으면(설치 배포), exe 기준 ../share/webapp/templates 검색
+    char exe_path[MAX_PATH];
+    if (GetModuleFileNameA(nullptr, exe_path, sizeof(exe_path)) > 0)
+    {
+        auto exe_dir = std::filesystem::path(exe_path).parent_path();
+        for (int levels = 1; levels <= 3; ++levels)
+        {
+            auto parent = exe_dir;
+            for (int i = 0; i < levels; ++i) parent = parent / "..";
+            auto candidate = std::filesystem::absolute(parent / "share" / "webapp" / "templates");
+            if (std::filesystem::exists(candidate))
+            {
+                s.home_directory = candidate.string();
+                return;
+            }
+        }
+    }
+
+    throw std::invalid_argument("home directory not found: " + s.home_directory +
+        "\n  Try --home-dir PATH or install with: cmake --install build/release --prefix dist");
 }
 
 } // namespace

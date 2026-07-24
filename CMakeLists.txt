@@ -255,3 +255,18 @@ if(BUILD_TESTING)
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test")
     endforeach()
 endif()
+
+# --- Install: 배포용 레이아웃 ---
+# cmake --install build/windows-release --prefix dist
+
+# 서버/클라 실행파일
+install(TARGETS iocp_echo_server iocp_echo_client iocp_http_server iocp_webapp_server
+    RUNTIME DESTINATION bin)
+
+# config 파일
+install(FILES config/echo_server.toml config/http_server.toml config/webapp.toml
+    DESTINATION config)
+
+# webapp templates
+install(DIRECTORY apps/webapp/templates/
+    DESTINATION share/webapp/templates)
