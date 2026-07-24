@@ -8,6 +8,23 @@ find_package(Threads REQUIRED)
 
 option(IOCP_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
 
+# 빌드 아웃풋 정리: bin/ lib/ test/
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+
+function(iocp_target_output_dirs target type)
+    if(type STREQUAL "app")
+        set_target_properties(${target} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    elseif(type STREQUAL "lib")
+        set_target_properties(${target} PROPERTIES
+            ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+    elseif(type STREQUAL "test")
+        set_target_properties(${target} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test")
+    endif()
+endfunction()
+
 FetchContent_Declare(
     tomlplusplus
     GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
@@ -219,4 +236,15 @@ if(BUILD_TESTING)
         COMMAND http_configuration_tests
     )
     add_test(NAME configuration_tests COMMAND configuration_tests)
+
+    # test 실행 파일은 test/ 디렉터리로
+    set(TEST_TARGETS
+        buffer_tests execution_tests m2_transport_tests
+        protocol_tests http_tests http_chunked_tests
+        http2_tests webapp_handler_tests http_server_tests
+        http_configuration_tests configuration_tests)
+    foreach(target ${TEST_TARGETS})
+        set_target_properties(${target} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test")
+    endforeach()
 endif()
