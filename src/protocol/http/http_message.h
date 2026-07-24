@@ -1,3 +1,6 @@
+/// @file http_message.h
+/// @brief HttpRequest/HttpResponse data types
+
 #pragma once
 
 #include <cstddef>

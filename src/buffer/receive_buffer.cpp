@@ -1,3 +1,4 @@
+// bounded compacting linear buffer 구현
 #include "buffer/receive_buffer.h"
 
 #include <algorithm>
@@ -62,6 +63,8 @@ BufferStatus ReceiveBuffer::EnsureWritable(
         }
     }
 
+    // 용량이 부족하면 2배씩 키우되 maximum_capacity_ 절반을 넘으면
+    // 바로 maximum_capacity_로 점프해 과도한 doubling을 방지한다.
     const std::size_t required_capacity =
         readable_bytes + minimum_bytes;
     std::size_t next_capacity = storage_.size();
@@ -165,6 +168,9 @@ ReceiveBufferSnapshot ReceiveBuffer::Snapshot() const noexcept
     };
 }
 
+// readable byte를 storage 앞으로 memmove하여 write tail 공간을 확보한다.
+// read_offset_이 0이면 호출되지 않으며, Consume 시 모든 byte를 소진했을
+// 때는 offset 초기화만으로 compaction을 대신한다.
 void ReceiveBuffer::Compact() noexcept
 {
     const std::size_t readable_bytes = ReadableBytes();

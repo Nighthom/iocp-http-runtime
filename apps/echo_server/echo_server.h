@@ -1,3 +1,6 @@
+/// @file echo_server.h
+/// @brief echo 서버 composition root
+
 #pragma once
 
 #include "core/logging.h"

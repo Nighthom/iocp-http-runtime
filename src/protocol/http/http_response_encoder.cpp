@@ -1,3 +1,4 @@
+// HTTP/1.1 response 인코딩 구현: status line, headers, body를 wire format으로 변환
 #include "protocol/http/http_response_encoder.h"
 
 #include <algorithm>

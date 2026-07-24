@@ -1,5 +1,11 @@
 #include "execution/iocp_executor.h"
 
+// IOCP executor 구현. IoContext::PostTask로 packet을 제출하고,
+// ExecutePacket에서 stop mode에 따라 task 실행/취소를 결정한다.
+// Post 실패 시 RollBackSubmission으로 pending count를 복구하며,
+// 모든 packet 소진/취소 시 MoveToStoppedIfDrainedLocked로 Stopped 전이 후
+// stopped_condition을 깨워 WaitStopped를 해제한다.
+
 #include "runtime/io_context.h"
 
 #include <condition_variable>

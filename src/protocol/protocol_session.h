@@ -1,3 +1,6 @@
+/// @file protocol_session.h
+/// @brief transport ↔ protocol 경계 interface
+
 #pragma once
 
 #include "buffer/byte_view.h"

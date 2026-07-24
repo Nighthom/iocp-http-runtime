@@ -1,3 +1,5 @@
+// entry point: CLI→LoadEchoApplicationOptions→EchoServer::Create
+
 #include "echo_server/configuration.h"
 
 #ifndef WIN32_LEAN_AND_MEAN

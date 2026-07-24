@@ -1,3 +1,4 @@
+// per-connection HTTP session: Append → Parse → Dispatch → Stop 사이클
 #include "protocol/http/http_session.h"
 
 #include <limits>
@@ -72,6 +73,8 @@ ProtocolFeedResult HttpSession::Feed(
     }
 
     std::size_t dispatched_now = 0;
+
+    // --- Feed loop: Append → Parse → Dispatch → Stop 사이클 ---
     for (;;)
     {
         HttpParseResult parsed =

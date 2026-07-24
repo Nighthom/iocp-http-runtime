@@ -1,3 +1,8 @@
+// tcp_connector.cpp
+// ConnectEx 기반의 outbound 비동기 연결 구현이다. 연결 등록, IOCP
+// completion 처리, connector 종료 흐름을 담당한다. Stop은 pending
+// socket을 닫아 IOCP cancellation completion을 유도하고, 모든
+// completion drain 이후 Stopped로 전이시킨다.
 #include "transport/tcp_connector.h"
 
 #include "runtime/completion_operation.h"

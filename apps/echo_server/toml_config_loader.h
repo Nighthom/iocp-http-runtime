@@ -1,3 +1,6 @@
+/// @file toml_config_loader.h
+/// @brief strict TOML → key-value override
+
 #pragma once
 
 #include <filesystem>

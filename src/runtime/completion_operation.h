@@ -1,3 +1,11 @@
+/// @file completion_operation.h
+/// @brief OVERLAPPED bridge — Windows IOCP가 반환하는 OVERLAPPED* 포인터에서
+/// C++ 객체로의 변환을 담당하는 추상 기반 클래스.
+///
+/// NativeOverlapped는 OVERLAPPED를 첫 멤버로 배치해 standard-layout 변환을
+/// 보장하며, CompletionOperation은 FromNative()로 owner를 복구한 뒤
+/// Complete()를 통해 terminal I/O 결과를 전달한다.
+
 #pragma once
 
 #ifndef WIN32_LEAN_AND_MEAN

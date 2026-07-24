@@ -1,3 +1,9 @@
+// tcp_listener.cpp
+// AcceptEx 기반 TCP listener의 생애 주기를 구현한다. 연결 수신 용량을
+// 유지하기 위해 completion 처리 전에 다음 AcceptEx를 먼저 등록하는
+// accept-before-complete 순서를 적용한다. Stop 시 listen socket을 먼저
+// 닫아 pending AcceptEx의 cancellation completion을 유도하고, 모든
+// outstanding accept가 drain된 후 Stopped로 전이한다.
 #include "transport/tcp_listener.h"
 
 #include "runtime/completion_operation.h"
@@ -228,6 +234,12 @@ int TcpListener::PostAcceptLocked()
         return ::WSAGetLastError();
     }
 
+    // AcceptEx 생애 주기:
+    // 1. 미리 accept socket을 생성하고 AcceptEx에 등록한다.
+    // 2. completion이 오면 accepted socket의 context를 listen socket에
+    //    연결(SO_UPDATE_ACCEPT_CONTEXT)하고 IOCP에 associate한다.
+    // 3. completion 처리 중 다음 AcceptEx를 먼저 등록(accept-before-complete)해
+    //    listen backlog가 소진되지 않도록 한다.
     auto operation = std::make_unique<AcceptOperation>(
         shared_from_this(),
         std::move(accepted_socket));
@@ -308,6 +320,10 @@ void TcpListener::OnAcceptCompleteImpl(
         if (completion_was_running)
         {
             listen_socket = listen_socket_.Get();
+            // accept-before-complete: 연결을 handler에 전달하기 전에
+            // 다음 AcceptEx를 먼저 등록한다. 이렇게 하면 backlog가
+            // 가득 차기 전에 항상 하나의 pending accept가 유지되어
+            // 연결 처리 지연이 accept 용량을 감소시키지 않는다.
             next_accept_error = PostAcceptLocked();
             if (next_accept_error != 0)
             {
@@ -462,6 +478,10 @@ void TcpListener::Stop() noexcept
         }
 
         state_ = ListenerState::Stopping;
+        // listen socket을 닫으면 pending AcceptEx가 취소되고 IOCP
+        // cancellation completion이 발생한다. 각 completion은
+        // outstanding_accepts_를 감소시키고, 모든 accept가 drain되면
+        // MoveToStoppedIfDrainedLocked가 Stopped로 전이시킨다.
         listen_socket_.Reset();
         became_stopped = MoveToStoppedIfDrainedLocked();
     }

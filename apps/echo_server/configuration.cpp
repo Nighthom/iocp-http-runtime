@@ -1,3 +1,6 @@
+// echo typed config: CLI, environment, TOML 우선순위로 typed 설정을 생성하고
+// 검증한 뒤 logger를 조립한다.
+
 #include "echo_server/configuration.h"
 #include "echo_server/toml_config_loader.h"
 

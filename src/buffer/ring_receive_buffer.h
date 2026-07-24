@@ -1,3 +1,4 @@
+/// @file bounded ring buffer, compact은 grow 시에만
 #pragma once
 
 #include "buffer/buffer_sequence.h"

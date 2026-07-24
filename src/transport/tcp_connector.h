@@ -1,5 +1,14 @@
 #pragma once
 
+/// @file tcp_connector.h
+/// @brief ConnectEx 기반의 outbound TCP 비동기 연결기다.
+///
+/// connector는 IOCP completion을 통해 연결 성공/실패를 비동기로
+/// 전달한다. handler 호출 시점에 socket은 이미 같은 IoContext에
+/// 연결(associate)되어 있어 바로 TcpConnection으로 이전할 수 있다.
+/// Stop 시 pending socket을 닫아 cancellation completion을 유도하고,
+/// 모든 completion이 drain된 후 Stopped로 전이한다.
+
 #include "core/logging.h"
 #include "platform/windows/socket_handle.h"
 #include "runtime/io_context.h"

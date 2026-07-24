@@ -1,3 +1,4 @@
+// HTTP route 등록 및 executor 기반 dispatch 구현
 #include "protocol/http/http_router.h"
 
 #include <stdexcept>
@@ -79,6 +80,7 @@ HttpDispatchStatus HttpRouter::Dispatch(
     HttpHandler handler;
     HttpResponse fallback;
     {
+        // --- dispatch: route lookup 후 executor에 handler 실행 등록 ---
         std::lock_guard lock(mutex_);
         const auto route = routes_.find(request.path);
         if (route == routes_.end())

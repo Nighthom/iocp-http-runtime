@@ -1,3 +1,6 @@
+// HTTP typed config: CLI 인자와 TOML 파일을 typed HttpServerOptions로 변환하고
+// 설정 간 consistency를 검증한다.
+
 #include "http_server/configuration.h"
 
 #include <toml++/toml.hpp>

@@ -1,5 +1,10 @@
 #include "execution/manual_executor.h"
 
+// ManualExecutor 구현. Post는 task를 내부 deque에만 push하며, RunOne()/
+// RunReady() 호출 시에만 pop-front하여 Execute를 호출한다. Stop(CancelPending)은
+// 남은 task를 clear하여 cancelled count에 반영하고, 모든 task 소진 시
+// MoveToStoppedIfDrainedLocked로 Stopped 상태로 전이한다.
+
 #include <stdexcept>
 #include <utility>
 

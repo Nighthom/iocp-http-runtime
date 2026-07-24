@@ -1,3 +1,6 @@
+/// @file configuration.h
+/// @brief HTTP typed config + CLI/environment/TOML merge
+
 #pragma once
 
 #include "http_server/http_server.h"

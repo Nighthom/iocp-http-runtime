@@ -1,5 +1,11 @@
 #include "execution/serial_executor.h"
 
+// SerialExecutor 구현. Post는 task를 deque에 넣고 drain이 미진행 상태이면
+// underlying에 drain lambda 하나를 제출한다. Drain()은 pending task를
+// 하나씩 pop-front하여 Execute로 실행하며, 실행 완료 후 MoveToStoppedIfDrainedLocked로
+// Stopped 조건을 확인한다. recursive mutex로 underlying InlineExecutor의
+// 재진입을 허용한다.
+
 #include <stdexcept>
 #include <utility>
 

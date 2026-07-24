@@ -1,3 +1,6 @@
+/// @file configuration.h
+/// @brief echo typed config + CLI/environment/TOML merge
+
 #pragma once
 
 #include "core/logging.h"

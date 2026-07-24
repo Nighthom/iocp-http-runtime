@@ -1,5 +1,12 @@
 #include "execution/thread_pool_executor.h"
 
+// ThreadPoolContext/ThreadPoolExecutor 구현. Context 생성 시 worker_count 만큼
+// WorkerMain 루프를 시작하며, Stop(Drain/CancelPending)으로 제출을 막고
+// Join으로 모든 worker를 회수한다. WorkerMain은 condition_variable에서 대기 후
+// task를 deque-front에서 pop하여 실행하며, Stopping+Drain 모드일 때만 task를
+// 계속 소비하고 StopMode::CancelPending 시에는 남은 task를 버리고 worker를
+// 종료시킨다.
+
 #include <condition_variable>
 #include <deque>
 #include <stdexcept>

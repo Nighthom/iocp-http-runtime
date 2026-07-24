@@ -1,3 +1,6 @@
+/// @file sample_dispatcher.h
+/// @brief sample protocol의 message id → executor dispatch
+
 #pragma once
 
 #include "execution/executor.h"

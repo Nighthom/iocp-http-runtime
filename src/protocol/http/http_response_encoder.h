@@ -1,3 +1,6 @@
+/// @file http_response_encoder.h
+/// @brief HTTP/1.1 response 직렬화
+
 #pragma once
 
 #include "protocol/http/http_message.h"

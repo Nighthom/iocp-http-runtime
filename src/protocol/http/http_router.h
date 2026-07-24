@@ -1,3 +1,6 @@
+/// @file http_router.h
+/// @brief exact-path router + executor dispatch
+
 #pragma once
 
 #include "execution/executor.h"

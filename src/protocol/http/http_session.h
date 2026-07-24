@@ -1,3 +1,6 @@
+/// @file http_session.h
+/// @brief per-connection HTTP session orchestration
+
 #pragma once
 
 #include "buffer/ring_receive_buffer.h"

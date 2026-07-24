@@ -1,3 +1,6 @@
+// HTTP 서버 composition root: SerialExecutor→HttpSession→TcpConnection 조립,
+// response_sender closure, shutdown barrier 순서를 관리한다.
+
 #include "http_server/http_server.h"
 
 #include "execution/serial_executor.h"

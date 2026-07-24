@@ -1,3 +1,7 @@
+// connection_registry.cpp
+// ConnectionRegistry의 연결 추가/제거/조회/대기 기능을 구현한다.
+// connection 제거 후 레지스트리가 비면 empty_condition을 알려
+// shutdown drain의 종료 감지가 가능하도록 한다.
 #include "transport/connection_registry.h"
 
 #include "transport/tcp_connection.h"
