@@ -4,6 +4,11 @@
 
 #include <toml++/toml.hpp>
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+
 #include <charconv>
 #include <climits>
 #include <cstdint>
@@ -189,7 +194,7 @@ void ApplyToml(
 std::optional<std::filesystem::path> FindConfigFile(
     const std::vector<std::string_view>& arguments)
 {
-    std::optional<std::filesystem::path> path;
+    // --config CLI가 명시됐으면 그대로 사용
     for (std::size_t index = 0; index < arguments.size(); ++index)
     {
         const std::string_view arg = arguments[index];
@@ -206,12 +211,32 @@ std::optional<std::filesystem::path> FindConfigFile(
         }
         else continue;
 
-        if (path || value.empty())
+        if (value.empty())
             throw std::invalid_argument(
                 "--config must specify one non-empty path");
-        path = value;
+        return std::filesystem::path{value};
     }
-    return path;
+
+    // --config 없으면 exe 기준으로 config/webapp.toml 검색
+    char exe_path[MAX_PATH];
+    if (GetModuleFileNameA(nullptr, exe_path, sizeof(exe_path)) == 0)
+        return std::nullopt;
+
+    std::filesystem::path exe_dir =
+        std::filesystem::path(exe_path).parent_path();
+
+    // bin/ 아래: ../../config/webapp.toml (build/windows-debug/bin → project root)
+    for (int levels = 1; levels <= 3; ++levels)
+    {
+        auto parent = exe_dir;
+        for (int i = 0; i < levels; ++i)
+            parent = parent / "..";
+        auto candidate = parent / "config" / "webapp.toml";
+        if (std::filesystem::exists(candidate))
+            return std::filesystem::canonical(candidate);
+    }
+
+    return std::nullopt;
 }
 
 void ApplyCommandLine(
