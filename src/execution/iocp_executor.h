@@ -1,5 +1,11 @@
 #pragma once
 
+/// @file
+/// @brief IOCP worker에 짧은 non-blocking task를 제출하는 bounded executor.
+///
+/// IoContext의 PostTask를 통해 IOCP completion queue에 task packet을 전달하며,
+/// Stop(Drain/CancelPending)과 WaitStopped로 graceful shutdown을 지원한다.
+
 #include "execution/executor.h"
 
 #include <chrono>

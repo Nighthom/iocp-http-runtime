@@ -1,5 +1,11 @@
 #pragma once
 
+/// @file
+/// @brief 테스트가 task 실행 시점을 직접 제어하는 bounded executor.
+///
+/// 외부 worker가 없고 RunOne()/RunReady()를 호출해야 task가 실행되므로,
+/// 단위 테스트에서 실행 순서와 중간 상태를 결정적으로 검증할 수 있다.
+
 #include "execution/executor.h"
 
 #include <chrono>

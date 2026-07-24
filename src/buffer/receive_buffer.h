@@ -1,3 +1,4 @@
+/// @file bounded compacting linear buffer
 #pragma once
 
 #include "buffer/buffer_status.h"

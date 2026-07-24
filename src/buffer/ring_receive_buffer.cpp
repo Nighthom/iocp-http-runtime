@@ -1,3 +1,4 @@
+// bounded ring buffer 구현, compact은 grow 시에만 수행
 #include "buffer/ring_receive_buffer.h"
 
 #include <algorithm>

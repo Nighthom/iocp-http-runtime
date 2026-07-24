@@ -1,3 +1,6 @@
+// strict TOML → key-value override: TOML 파일을 읽어 schema version, key,
+// value type을 엄격하게 검증한 뒤 ConfigurationOverride 목록으로 변환한다.
+
 #include "echo_server/toml_config_loader.h"
 
 #include <toml++/toml.hpp>

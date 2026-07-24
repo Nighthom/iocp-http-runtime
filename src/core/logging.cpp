@@ -1,3 +1,7 @@
+// logging.cpp
+// Logger, StreamLogSink, FileLogSink의 구현. UTC timestamp 생성, JSON 스타일
+// escaping, 레벨 필터링, sink snapshot 후 I/O 직렬화를 담당한다.
+
 #include "core/logging.h"
 
 #ifndef WIN32_LEAN_AND_MEAN

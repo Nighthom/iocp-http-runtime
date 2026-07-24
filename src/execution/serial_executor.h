@@ -1,5 +1,12 @@
 #pragma once
 
+/// @file
+/// @brief underlying executor 위에 admitted task의 FIFO 직렬화를 보장하는 executor.
+///
+/// SerialExecutor는 내부 deque에 task를 쌓고 drain task 하나를 underlying에
+/// 제출하여 비중첩 순차 실행을 구현한다. drain이 활성화된 동안 추가 task는
+///Post만으로 enqueue되므로, 추가적인 underlying 제출 없이 직렬 실행을 유지한다.
+
 #include "execution/executor.h"
 
 #include <chrono>

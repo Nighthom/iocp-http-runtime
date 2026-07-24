@@ -1,3 +1,6 @@
+/// @file length_prefixed_session.h
+/// @brief sample protocol의 buffer/decoder/dispatch session
+
 #pragma once
 
 #include "buffer/ring_receive_buffer.h"

@@ -1,3 +1,5 @@
+// entry point: CLI→TOML→HttpServer::Create
+
 #include "http_server/configuration.h"
 #include "core/logging.h"
 #include "http_server/http_server.h"

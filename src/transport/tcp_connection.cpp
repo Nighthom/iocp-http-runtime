@@ -1,3 +1,8 @@
+// tcp_connection.cpp
+// TcpConnection의 IOCP completion 처리, send queue drain, 상태 전이를
+// 구현한다. 한 연결당 하나의 WSASend/WSARecv만 유지하는 ordering
+// contract를 IOCP worker 내에서 보존한다. close는 pending operation이
+// 모두 drain된 후 socket을 닫고 registry에서 제거하는 순서로 진행된다.
 #include "transport/tcp_connection.h"
 
 #include "runtime/completion_operation.h"
@@ -461,6 +466,10 @@ int TcpConnection::PostSendLocked()
         return state_ == ConnectionState::Active ? WSAEALREADY : WSAESHUTDOWN;
     }
 
+    // send queue에서 configured gather 상한(segment 수, byte 수)까지
+    // slice를 모아 하나의 WSASend로 제출한다. Gather가 반환하는 각
+    // slice는 원본 buffer의 shared_ptr을 참조하므로 WSASend completion
+    // 시점까지 buffer 수명이 보존된다.
     SendGather gather = send_queue_.Gather(
         maximum_gather_segments_per_operation_,
         maximum_gather_bytes_per_operation_);
@@ -519,6 +528,10 @@ void TcpConnection::OnReceiveComplete(
             }
             receive_in_flight_ = false;
 
+            // guard clause chain: error → peer close(0 bytes) → overflow →
+            // normal delivery 순으로 검사한다. Active 상태일 때만 상태
+            // 변경을 허용해 이미 Closing/Closed인 connection에서 중복
+            // close가 발생하지 않도록 한다.
             if (error)
             {
                 if (state_ == ConnectionState::Active)
@@ -529,6 +542,7 @@ void TcpConnection::OnReceiveComplete(
             }
             else if (transferred_bytes == 0)
             {
+                // TCP FIN 수신: peer가 정상적으로 연결을 닫았다.
                 if (state_ == ConnectionState::Active)
                 {
                     BeginCloseLocked(CloseReason::PeerClosed);
@@ -537,6 +551,7 @@ void TcpConnection::OnReceiveComplete(
             }
             else if (transferred_bytes > storage.Size())
             {
+                // 버퍼 경계를 넘는 전송량은 프로토콜 위반 또는 버그다.
                 if (state_ == ConnectionState::Active)
                 {
                     BeginCloseLocked(CloseReason::ReceiveError);
@@ -648,6 +663,10 @@ void TcpConnection::OnSendComplete(
             }
             send_in_flight_ = false;
 
+            // guard clause chain: send error → partial send/overflow/invalid
+            // consume → next send → close_after_send shutdown 순으로 처리.
+            // 전송량 검증(0 byte, overflow)은 TCP send completion이 항상 모든
+            // byte를 전송하지 않을 수 있음을 고려한 방어 코드다.
             if (error)
             {
                 if (state_ == ConnectionState::Active)
@@ -663,6 +682,8 @@ void TcpConnection::OnSendComplete(
                     send_queue_.Consume(transferred_bytes) ==
                         SendConsumeResult::Invalid)
                 {
+                    // 0 byte 전송은 socket 오류, overflow/invalid consume은
+                    // 내부 상태 불일치를 의미하므로 연결을 종료한다.
                     BeginCloseLocked(CloseReason::SendError);
                     close_to_log = CloseReason::SendError;
                 }
@@ -671,6 +692,9 @@ void TcpConnection::OnSendComplete(
                     sent_bytes_ += transferred_bytes;
                     if (!send_queue_.Empty())
                     {
+                        // 아직 보낼 데이터가 남았으면 다음 send를 즉시 등록한다.
+                        // send_in_flight_가 false인 상태이므로 PostSendLocked가
+                        // 성공할 수 있다.
                         post_error = PostSendLocked();
                         if (post_error != 0)
                         {
@@ -680,6 +704,9 @@ void TcpConnection::OnSendComplete(
                     }
                     else if (close_after_send_)
                     {
+                        // 모든 데이터가 전송된 후 close_after_send_ 플래그가
+                        // 설정되어 있으면 shutdown(SD_SEND)로 half-close 후
+                        // 연결을 종료한다.
                         static_cast<void>(
                             ::shutdown(socket_.Get(), SD_SEND));
                         BeginCloseLocked(CloseReason::ProtocolClose);
@@ -748,6 +775,8 @@ void TcpConnection::BeginClose(const CloseReason reason) noexcept
 
 bool TcpConnection::BeginCloseLocked(const CloseReason reason) noexcept
 {
+    // 이미 Closing 또는 Closed면 중복 close를 막는다.
+    // close reason은 최초 호출 시점의 것을 보존한다.
     if (state_ != ConnectionState::Active)
     {
         return false;
@@ -756,12 +785,18 @@ bool TcpConnection::BeginCloseLocked(const CloseReason reason) noexcept
     state_ = ConnectionState::Closing;
     close_reason_ = reason;
     close_after_send_ = false;
+    // socket을 먼저 닫아 pending I/O의 cancellation completion을 유도한다.
+    // 이 시점부터 PostReceiveLocked와 PostSendLocked는 WSAESHUTDOWN을 반환한다.
     socket_.Reset();
     return true;
 }
 
 bool TcpConnection::MoveToClosedIfDrainedLocked() noexcept
 {
+    // Closing 상태이고 모든 outstanding operation이 완료(drain)되었을 때만
+    // Closed로 전이한다. 이 설계는 I/O completion과 close 타이밍 간 race
+    // condition을 방지한다: cancellation completion이 도착하기 전에
+    // connection이 registry에서 제거되는 것을 막는다.
     if (state_ == ConnectionState::Closing &&
         outstanding_operations_ == 0)
     {

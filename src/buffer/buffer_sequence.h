@@ -1,3 +1,4 @@
+/// @file 최대 2 span logical view
 #pragma once
 
 #include "buffer/byte_view.h"

@@ -1,3 +1,4 @@
+// HTTP message 유틸리티 구현: Header 검색, method 파싱, reason phrase, byte 변환, 응답 생성
 #include "protocol/http/http_message.h"
 
 #include <algorithm>

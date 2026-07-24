@@ -1,3 +1,8 @@
+/// @file socket_handle.h
+/// @brief RAII SOCKET 래퍼 — Winsock SOCKET의 소유권을 관리하는
+/// move-only 타입. 소멸자에서 closesocket을 호출하며, Release()로
+/// 소유권 이전, Reset()으로 교체를 지원한다.
+
 #pragma once
 
 #ifndef WIN32_LEAN_AND_MEAN

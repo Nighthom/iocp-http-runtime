@@ -1,3 +1,4 @@
+// sample protocol dispatcher 구현: handler 등록 및 executor 실행
 #include "protocol/sample/sample_dispatcher.h"
 
 #include <stdexcept>

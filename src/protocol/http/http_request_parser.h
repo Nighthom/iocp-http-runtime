@@ -1,3 +1,6 @@
+/// @file http_request_parser.h
+/// @brief incremental HTTP/1.1 request parser
+
 #pragma once
 
 #include "buffer/buffer_sequence.h"

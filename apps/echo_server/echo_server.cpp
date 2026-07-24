@@ -1,3 +1,6 @@
+// echo 서버 composition root: TcpListener→TcpConnection→echo receive handler
+// 조립, shutdown barrier 순서를 관리한다.
+
 #include "echo_server/echo_server.h"
 
 #include <algorithm>

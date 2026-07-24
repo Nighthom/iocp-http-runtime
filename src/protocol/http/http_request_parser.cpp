@@ -1,3 +1,4 @@
+// HTTP/1.1 request 증분 파서 구현: ReadLine → ParseRequestLine → ParseHeaders → Body 수집 loop
 #include "protocol/http/http_request_parser.h"
 
 #include "buffer/byte_view.h"
@@ -166,6 +167,7 @@ HttpParseResult HttpRequestParser::Parse(
         return Fail(HttpParseError::InvalidRequestLine);
     }
 
+    // --- parse loop: RequestLine → Headers → Body 상태 머신 ---
     for (;;)
     {
         if (state_ == State::RequestLine)

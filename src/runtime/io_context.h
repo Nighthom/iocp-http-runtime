@@ -1,3 +1,10 @@
+/// @file io_context.h
+/// @brief IoContext — 하나의 Windows completion port와 여러 worker thread를
+/// 소유하고 수명을 관리한다.
+///
+/// handle association, task packet injection, stop/join shutdown contract를
+/// 제공하며, application은 IocpExecutor를 통해 이 컨텍스트에 작업을 제출한다.
+
 #pragma once
 
 #include "core/logging.h"

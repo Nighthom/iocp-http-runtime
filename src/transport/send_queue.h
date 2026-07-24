@@ -1,5 +1,17 @@
 #pragma once
 
+/// @file send_queue.h
+/// @brief WSASend에 제출할 데이터의 bounded FIFO 큐다.
+///
+/// connection mutex 아래에서 운영되며 자체적으로 thread-safe하지 않다.
+/// 핵심 역할은 세 가지다:
+/// 1. atomic batch admission: 여러 segment를 한 번에 넣거나 전부 거부한다.
+/// 2. gather: WSASend의 scatter-gather 배열에 맞춰 partial offset을
+///    포함한 WSABUF descriptor를 생성한다.
+/// 3. consume: completion으로 보고된 byte만큼 front에서 소비하고,
+///    중간 segment 완료 시 shared_ptr 참조를 해제해 buffer 수명을
+///    IOCP로부터 분리한다.
+
 #include <cstddef>
 #include <cstdint>
 #include <deque>

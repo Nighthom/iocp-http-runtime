@@ -1,5 +1,12 @@
 #pragma once
 
+/// @file
+/// @brief 제출한 스레드에서 task를 즉시 동기 실행하는 executor.
+///
+/// Post 호출 스레드에서 task를 곧바로 실행하므로 별도의 queue나 worker가
+/// 존재하지 않는다. SerialExecutor의 underlying으로 사용 시 재진입되는
+/// 특성을 가지며, 테스트나 short task의 inline 실행에 적합하다.
+
 #include "execution/executor.h"
 
 #include <stdexcept>

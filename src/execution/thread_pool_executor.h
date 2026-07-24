@@ -1,5 +1,13 @@
 #pragma once
 
+/// @file
+/// @brief bounded queue와 고정 worker thread pool을 소유하는 executor.
+///
+/// ThreadPoolContext가 worker vector와 shared state의 lifecycle을 관리하며,
+/// ThreadPoolExecutor는 IExecutor interface로 context의 bounded queue에
+/// task를 제출한다. Drain join 시 worker가 자기 자신을 detach하여
+/// shared State lifetime을 안전하게 유지한다.
+
 #include "execution/executor.h"
 
 #include <chrono>

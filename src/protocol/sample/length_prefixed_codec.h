@@ -1,3 +1,6 @@
+/// @file length_prefixed_codec.h
+/// @brief sample protocol의 length-prefixed frame decoder/encoder
+
 #pragma once
 
 #include "buffer/buffer_sequence.h"

@@ -1,3 +1,13 @@
+// io_context.cpp
+// IoContext의 생성/소멸, handle association, worker GQCS 루프, stop/join
+// shutdown을 구현한다. stop packet, task packet, native I/O completion을
+// 하나의 GQCS 루프에서 3-way dispatch한다.
+//
+// dispatch 우선순위:
+//  1. task packet (kTaskCompletionKey + non-null OVERLAPPED)
+//  2. stop packet  (null OVERLAPPED + kStopCompletionKey)
+//  3. native I/O completion (그 외 non-null OVERLAPPED)
+
 #include "runtime/io_context.h"
 
 #include <memory>
@@ -230,6 +240,8 @@ public:
                 INFINITE);
             const DWORD error = succeeded ? ERROR_SUCCESS : ::GetLastError();
 
+            // ── 3-way dispatch ──────────────────────────────────
+            // (1) task packet: IocpExecutor가 PQCS로 주입한 사용자 작업
             if (completion_key == kTaskCompletionKey &&
                 overlapped != nullptr)
             {
@@ -257,8 +269,11 @@ public:
                 continue;
             }
 
+            // (2) stop packet 또는 dequeue 실패: OVERLAPPED가 없는
+            //     completion은 runtime 제어용이다.
             if (overlapped == nullptr)
             {
+                // (2a) 정상적인 stop packet → worker 종료
                 if (succeeded && completion_key == kStopCompletionKey)
                 {
                     logger_->Log(
@@ -296,8 +311,10 @@ public:
                 continue;
             }
 
-            // GQCS가 FALSE를 반환해도 OVERLAPPED가 non-null이면 실패한 I/O의
-            // completion이다. 이 경로에서도 operation ownership을 회수한다.
+            // (3) native I/O completion: Accept, WSARecv, WSASend 등
+            //     overlapped API가 완료됐을 때 반환된다. GQCS가 FALSE를
+            //     반환해도 OVERLAPPED가 non-null이면 실패한 I/O completion이므로
+            //     operation ownership을 정상 회수한다.
             auto operation = std::unique_ptr<CompletionOperation>(
                 CompletionOperation::FromNative(overlapped));
 

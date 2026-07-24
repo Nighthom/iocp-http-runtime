@@ -1,5 +1,15 @@
 #pragma once
 
+/// @file tcp_listener.h
+/// @brief AcceptEx 기반의 TCP listening socket 관리자다.
+///
+/// 항상 하나의 pending AcceptEx를 유지하며, completion에서 accept-before-complete
+/// 순서로 다음 AcceptEx를 등록해 listen backlog 소진을 방지한다.
+/// Stop은 listen socket을 먼저 닫아 pending AcceptEx의 IOCP cancellation
+/// completion을 유도하고, 모든 outstanding accept가 drain된 후 Stopped로
+/// 전이한다. pending AcceptOperation이 listener의 shared ownership을
+/// 보존하므로, completion이 모두 처리될 때까지 객체가 살아있다.
+
 #include "core/logging.h"
 #include "platform/windows/socket_handle.h"
 #include "runtime/io_context.h"

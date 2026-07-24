@@ -1,3 +1,10 @@
+/// @file logging.h
+/// @brief 구조화 로깅 시스템 — LogLevel, LogField, LogRecord, ILogSink,
+/// StreamLogSink, FileLogSink, Logger, MakeConsoleLogger를 제공한다.
+///
+/// thread-safe하며 sink failure를 호출자에게 전파하지 않는다. stdout/stderr
+/// 분리 콘솔 logger와 file append sink를 기본 제공한다.
+
 #pragma once
 
 #include <cstddef>

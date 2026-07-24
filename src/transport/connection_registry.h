@@ -1,5 +1,13 @@
 #pragma once
 
+/// @file connection_registry.h
+/// @brief 프로세스 내 활성 TCP 연결의 shared ownership 레지스트리다.
+///
+/// TcpConnection이 파괴될 때 자신을 등록 해제하며, 레지스트리가 빌 때까지
+/// 대기하는 `WaitEmpty`를 통해 정상적인 shutdown drain을 보장한다.
+/// registry lock을 잡은 상태에서 connection method를 호출하지 않아
+/// 교착을 방지한다.
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>

@@ -1,5 +1,13 @@
 #pragma once
 
+/// @file
+/// @brief application task의 제출, admission, 생명주기 제어를 위한
+/// 핵심 타입(IExecutor, Task, SubmitStatus, StopMode, ExecutorSnapshot)을 정의한다.
+///
+/// 모든 executor 구현체는 IExecutor contract를 통해 제출된 task의 실행을
+/// 보장하며, admission 정책(Stopped/Saturated 제어)과 stop mode(Drain/CancelPending)로
+/// graceful shutdown을 지원한다.
+
 #include <cstddef>
 #include <exception>
 #include <functional>

@@ -1,3 +1,6 @@
+/// @file http_server.h
+/// @brief HTTP 서버 composition root
+
 #pragma once
 
 #include "core/logging.h"

@@ -1,3 +1,4 @@
+/// @file ownership 없는 borrowed byte range
 #pragma once
 
 #include <cstddef>

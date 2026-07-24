@@ -1,5 +1,20 @@
 #pragma once
 
+/// @file tcp_connection.h
+/// @brief TCP 연결 하나의 전체 수명을 관리한다.
+///
+/// 연결은 단일 WSASend와 WSARecv를 1:1로 유지하며, IOCP completion
+/// worker에서 상태 전이를 처리한다. send queue 상한 초과 시 연결을
+/// 닫는 M2(backpressure→close) 정책을 적용한다. 상태 전이는
+/// Active→Closing→Closed 순으로 진행되며, outstanding operation이
+/// 모두 drain된 후에만 registry에서 제거된다.
+///
+/// @note connection mutex 아래에서만 상태를 변경하며, handler 호출은
+///       mutex 밖에서 수행해 데드락을 방지한다.
+/// @note 한 연결당 receive와 send는 각각 하나의 outstanding I/O만
+///       허용한다. 이는 TCP 스트림의 순서 보장과 내부 상태 추적을
+///       단순화하기 위한 설계다.
+
 #include "buffer/byte_view.h"
 #include "core/logging.h"
 #include "platform/windows/socket_handle.h"
