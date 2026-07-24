@@ -47,7 +47,7 @@ std::uint64_t ParseUnsigned(
 
 void ApplyOption(
     WebAppApplicationOptions& options,
-    const std::string_view name,
+    std::string_view name,
     const std::string_view value)
 {
     if (name == "address")
@@ -143,6 +143,12 @@ void ApplyToml(
     const toml::table* server = root.get("server")->as_table();
     if (!server) return;
 
+    // TOML key는 underscore, ApplyOption은 hyphen을 기대하므로 변환
+    auto to_cli = [](const char* key) {
+        std::string s(key);
+        for (auto& c : s) if (c == '_') c = '-';
+        return s;
+    };
     auto apply_int = [&](const char* key) {
         const auto* node = server->get(key);
         if (!node) return;
@@ -151,7 +157,7 @@ void ApplyToml(
             throw std::invalid_argument(
                 std::string{"server."} + key +
                 " must be a non-negative integer");
-        ApplyOption(options, key, std::to_string(*val));
+        ApplyOption(options, to_cli(key), std::to_string(*val));
     };
     auto apply_str = [&](const char* key) {
         const auto* node = server->get(key);
@@ -160,7 +166,7 @@ void ApplyToml(
         if (!val)
             throw std::invalid_argument(
                 std::string{"server."} + key + " must be a string");
-        ApplyOption(options, key, *val);
+        ApplyOption(options, to_cli(key), *val);
     };
 
     apply_int("port");
