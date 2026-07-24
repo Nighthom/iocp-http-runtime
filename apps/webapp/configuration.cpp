@@ -167,6 +167,23 @@ void ApplyToml(
     apply_int("shutdown_timeout_ms");
     apply_str("address");
     apply_str("template_dir");
+
+    // template_dir가 상대 경로면 config file 기준으로 resolve
+    const auto* td_node = server->get("template_dir");
+    if (td_node)
+    {
+        const auto td = td_node->value_exact<std::string>();
+        if (td)
+        {
+            std::filesystem::path template_path(*td);
+            if (template_path.is_relative())
+            {
+                template_path = path.parent_path() / template_path;
+            }
+            options.server.template_directory =
+                std::filesystem::absolute(template_path).string();
+        }
+    }
 }
 
 std::optional<std::filesystem::path> FindConfigFile(
@@ -247,9 +264,9 @@ void ApplyCommandLine(
     }
 }
 
-void Validate(const WebAppApplicationOptions& options)
+void Validate(WebAppApplicationOptions& options)
 {
-    const auto& s = options.server;
+    auto& s = options.server;
     if (s.io_worker_count == 0 ||
         s.application_worker_count == 0 ||
         s.maximum_application_tasks == 0 ||
@@ -263,6 +280,14 @@ void Validate(const WebAppApplicationOptions& options)
     {
         throw std::invalid_argument(
             "template_directory must not be empty");
+    }
+    // 상대 경로면 absolute로 resolve
+    s.template_directory =
+        std::filesystem::absolute(s.template_directory).string();
+    if (!std::filesystem::exists(s.template_directory))
+    {
+        throw std::invalid_argument(
+            "template directory not found: " + s.template_directory);
     }
     if (s.shutdown_timeout <= std::chrono::milliseconds::zero())
     {
