@@ -160,22 +160,16 @@ maximum_requests_per_connection = 100
 
 ## Repository Layout
 
-```text
-apps/
-  echo_client/       ConnectEx와 transport 확인용 client
-  echo_server/       length-prefixed sample service
-  http_server/       HTTP composition root와 기본 route
-config/              실행 설정 예시
-src/
-  buffer/            byte view, linear/ring receive buffer
-  core/              logging
-  execution/         executor implementations
-  platform/windows/  Winsock RAII
-  protocol/          sample protocol과 HTTP/1.1
-  runtime/           IOCP context와 completion operation
-  transport/         listener, connector, connection, send queue
-tests/               unit 및 loopback integration tests
-```
+| Path | Role |
+| --- | --- |
+| [`apps/`](apps/README.md) | 실행 파일, service composition root, route 등록 |
+| [`config/`](config/README.md) | echo와 HTTP 서버의 TOML 설정 예시 |
+| [`src/`](src/README.md) | reusable runtime, transport, execution, protocol |
+| [`tests/`](tests/README.md) | unit, loopback integration, configuration tests |
+
+상위 README는 실행과 공개 범위를 설명하고, 각 디렉터리 README는 코드를
+읽거나 수정할 때 필요한 책임 경계만 설명합니다. 세부 source 디렉터리는
+구조가 더 커지기 전까지 별도 README를 두지 않습니다.
 
 ## Project Status
 
