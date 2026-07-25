@@ -165,7 +165,8 @@ TcpConnection::TcpConnection(
       socket_options_(options.socket),
       send_queue_(
           options.maximum_send_queue_items,
-          options.maximum_send_queue_bytes)
+          options.maximum_send_queue_bytes),
+      connection_timeout_(options.connection_timeout)
 {
     if (id_ == 0)
     {
@@ -455,6 +456,7 @@ int TcpConnection::PostReceiveLocked()
         {
             --outstanding_operations_;
             receive_in_flight_ = false;
+            UpdateIdleTimerLocked();
             return error;
         }
     }
@@ -505,6 +507,7 @@ int TcpConnection::PostSendLocked()
         {
             --outstanding_operations_;
             send_in_flight_ = false;
+            UpdateIdleTimerLocked();
             return error;
         }
     }
@@ -532,6 +535,7 @@ void TcpConnection::OnReceiveComplete(
                 --outstanding_operations_;
             }
             receive_in_flight_ = false;
+            UpdateIdleTimerLocked();
 
             // guard clause chain: error → peer close(0 bytes) → overflow →
             // normal delivery 순으로 검사한다. Active 상태일 때만 상태
@@ -667,6 +671,7 @@ void TcpConnection::OnSendComplete(
                 --outstanding_operations_;
             }
             send_in_flight_ = false;
+            UpdateIdleTimerLocked();
 
             // guard clause chain: send error → partial send/overflow/invalid
             // consume → next send → close_after_send shutdown 순으로 처리.
@@ -790,6 +795,7 @@ bool TcpConnection::BeginCloseLocked(const CloseReason reason) noexcept
     state_ = ConnectionState::Closing;
     close_reason_ = reason;
     close_after_send_ = false;
+    CancelIdleTimer();
     // socket을 먼저 닫아 pending I/O의 cancellation completion을 유도한다.
     // 이 시점부터 PostReceiveLocked와 PostSendLocked는 WSAESHUTDOWN을 반환한다.
     socket_.Reset();
@@ -903,6 +909,40 @@ bool TcpConnection::ApplySocketOptions() noexcept
     }
 
     return result;
+}
+
+void TcpConnection::SetTimerService(
+    std::shared_ptr<core::TimerService> timer)
+{
+    std::lock_guard lock(mutex_);
+    timer_service_ = std::move(timer);
+    if (connection_timeout_ > std::chrono::milliseconds::zero())
+        UpdateIdleTimerLocked();
+}
+
+void TcpConnection::UpdateIdleTimerLocked()
+{
+    if (!timer_service_ || connection_timeout_ <= std::chrono::milliseconds::zero())
+        return;
+    if (state_ != ConnectionState::Active)
+        return;
+
+    auto self = shared_from_this();
+    idle_timer_id_ = timer_service_->Reschedule(
+        idle_timer_id_,
+        connection_timeout_,
+        [self] {
+            self->BeginClose(CloseReason::None);
+        });
+}
+
+void TcpConnection::CancelIdleTimer() noexcept
+{
+    if (timer_service_ && idle_timer_id_ != 0)
+    {
+        timer_service_->Cancel(idle_timer_id_);
+        idle_timer_id_ = 0;
+    }
 }
 
 std::string_view CloseReasonName(const CloseReason reason) noexcept

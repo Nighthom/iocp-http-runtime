@@ -17,6 +17,7 @@
 
 #include "buffer/byte_view.h"
 #include "core/logging.h"
+#include "core/timer_service.h"
 #include "platform/windows/socket_handle.h"
 #include "transport/send_queue.h"
 
@@ -159,6 +160,9 @@ public:
     bool WaitClosed(std::chrono::milliseconds timeout);
     ConnectionSnapshot Snapshot() const;
 
+    /// @brief timer를 connection에 주입한다 (idle timeout용).
+    void SetTimerService(std::shared_ptr<core::TimerService> timer);
+
 private:
     class ReceiveOperation;
     class SendOperation;
@@ -182,6 +186,8 @@ private:
         std::size_t submitted_bytes,
         std::error_code error) noexcept;
     bool BeginCloseLocked(CloseReason reason) noexcept;
+    void UpdateIdleTimerLocked();
+    void CancelIdleTimer() noexcept;
     SendStatus SendBatchInternal(
         OutboundBatch segments,
         bool close_after_send) noexcept;
@@ -212,6 +218,10 @@ private:
     bool close_after_send_{false};
     std::uint64_t received_bytes_{0};
     std::uint64_t sent_bytes_{0};
+    std::chrono::milliseconds connection_timeout_{
+        std::chrono::seconds{0}};
+    std::shared_ptr<core::TimerService> timer_service_;
+    core::TimerId idle_timer_id_{0};
 };
 
 std::string_view CloseReasonName(CloseReason reason) noexcept;
