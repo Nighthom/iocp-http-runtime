@@ -57,6 +57,8 @@ WebAppServer::WebAppServer(
           std::make_shared<transport::ConnectionRegistry>())
     , router_(
           std::make_shared<protocol::http::HttpRouter>())
+    , timer_service_(
+          std::make_shared<core::TimerService>())
 {
     webapp::SetHomeDirectory(options_.home_directory);
 }
@@ -477,6 +479,16 @@ void WebAppServer::AddSession(
 {
     std::lock_guard lock(auth_mutex_);
     sessions_[token] = username;
+
+    // 1시간 후 session 자동 만료
+    auto weak_token = std::weak_ptr<std::string>(
+        std::make_shared<std::string>(token));
+    (void)timer_service_->Schedule(
+        std::chrono::hours{1},
+        [this, token_copy = token] {
+            std::lock_guard lock2(auth_mutex_);
+            sessions_.erase(token_copy);
+        });
 }
 
 std::vector<webapp::Post> WebAppServer::GetPosts() const

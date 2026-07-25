@@ -4,6 +4,7 @@
 #pragma once
 
 #include "core/logging.h"
+#include "core/timer_service.h"
 #include "execution/thread_pool_executor.h"
 #include "platform/windows/winsock_runtime.h"
 #include "protocol/http/http_response_encoder.h"
@@ -90,6 +91,7 @@ private:
     std::shared_ptr<transport::ConnectionRegistry> registry_;
     std::shared_ptr<protocol::http::HttpRouter> router_;
     std::shared_ptr<transport::TcpListener> listener_;
+    std::shared_ptr<core::TimerService> timer_service_;
 
     mutable std::mutex state_mutex_;
     std::mutex stop_mutex_;
