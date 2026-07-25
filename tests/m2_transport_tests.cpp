@@ -1063,7 +1063,7 @@ void TestConnectionEchoAndQueueOverflow()
                 logger,
                 [](const std::shared_ptr<TcpConnection>&,
                    const ByteView) {},
-                ConnectionOptions{2, 1, 4096, 1, 1, 1, {}});
+                ConnectionOptions{2, 1, 4096, 1, 1, 1, std::chrono::milliseconds{0}, {}});
             overflow_registry->Add(connection);
             connection->Start();
             {

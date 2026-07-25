@@ -87,6 +87,8 @@ struct ConnectionOptions final
     std::size_t maximum_gather_segments_per_operation{16};
     std::size_t maximum_gather_bytes_per_operation{64 * 1024};
     std::size_t maximum_outbound_batch_segments{16};
+    std::chrono::milliseconds connection_timeout{
+        std::chrono::seconds{0}}; // 0 = disabled
     ConnectedSocketOptions socket;
 };
 
