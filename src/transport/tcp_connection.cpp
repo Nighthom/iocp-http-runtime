@@ -454,7 +454,8 @@ int TcpConnection::PostReceiveLocked()
         const int error = ::WSAGetLastError();
         if (error != WSA_IO_PENDING)
         {
-            --outstanding_operations_;
+            if (outstanding_operations_ > 0)
+                --outstanding_operations_;
             receive_in_flight_ = false;
             UpdateIdleTimerLocked();
             return error;
@@ -505,7 +506,8 @@ int TcpConnection::PostSendLocked()
         const int error = ::WSAGetLastError();
         if (error != WSA_IO_PENDING)
         {
-            --outstanding_operations_;
+            if (outstanding_operations_ > 0)
+                --outstanding_operations_;
             send_in_flight_ = false;
             UpdateIdleTimerLocked();
             return error;
@@ -532,6 +534,7 @@ void TcpConnection::OnReceiveComplete(
             std::lock_guard lock(mutex_);
             if (outstanding_operations_ > 0)
             {
+                if (outstanding_operations_ > 0)
                 --outstanding_operations_;
             }
             receive_in_flight_ = false;
@@ -668,6 +671,7 @@ void TcpConnection::OnSendComplete(
             std::lock_guard lock(mutex_);
             if (outstanding_operations_ > 0)
             {
+                if (outstanding_operations_ > 0)
                 --outstanding_operations_;
             }
             send_in_flight_ = false;
