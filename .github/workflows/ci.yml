@@ -15,20 +15,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup MinGW-w64
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: mingw64
-          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-ninja mingw-w64-x86_64-cmake
+      - name: Setup MinGW + CMake + Ninja
+        run: |
+          choco install mingw cmake ninja -y --no-progress
+          echo "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "C:\tools\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Configure
-        shell: msys2 {0}
-        run: cmake --preset ${{ matrix.preset }}
+        run: cmake --preset ${{ matrix.preset }} -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
 
       - name: Build
-        shell: msys2 {0}
         run: cmake --build --preset ${{ matrix.preset }}
 
       - name: Test
-        shell: msys2 {0}
         run: ctest --preset ${{ matrix.preset }} --output-on-failure
