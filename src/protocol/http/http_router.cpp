@@ -104,7 +104,8 @@ HttpDispatchStatus HttpRouter::Dispatch(
         }
         else
         {
-            if (request.method == HttpMethod::Get)
+            if (request.method == HttpMethod::Get ||
+                request.method == HttpMethod::Head)
             {
                 handler = route->second.get;
             }
@@ -150,6 +151,10 @@ HttpDispatchStatus HttpRouter::Dispatch(
             }
             response.close_connection =
                 response.close_connection || close_connection;
+            if (request.method == HttpMethod::Head)
+            {
+                response.body.clear();
+            }
             response_sender(std::move(response));
         });
     return ToDispatchStatus(status);
