@@ -5,6 +5,7 @@
 
 #include "execution/serial_executor.h"
 #include "protocol/http2/http2_frames.h"
+#include "protocol/http2/http2_hpack.h"
 #include "protocol/http2/http2_stream.h"
 
 #include <exception>
