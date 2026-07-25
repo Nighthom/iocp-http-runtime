@@ -295,21 +295,42 @@ void HttpServer::OnAccepted(
                                     router,
                                     serial_executor,
                                     [connection_slot](
-                                        [[maybe_unused]] std::uint32_t stream_id,
+                                        std::uint32_t /*stream_id*/,
                                         protocol::http::HttpResponse
-                                            response) {
-                                        // Encode response and send as H2 frames
+                                            response) mutable {
                                         const auto conn =
                                             connection_slot->lock();
                                         if (!conn) return;
+                                        // H2 response → HEADERS + DATA frames
+                                        using namespace protocol::http2;
+                                        HpackCodec hpack;
+                                        std::vector<protocol::http::HttpHeader> hdrs;
+                                        hdrs.push_back({":status", std::to_string(response.status_code)});
+                                        for (auto& h : response.headers) hdrs.push_back(std::move(h));
+                                        auto hb = hpack.Encode(hdrs);
 
-                                        // Build HEADERS frame
-                                        protocol::http::HttpResponseEncoder
-                                            h2_encoder;
-                                        h2_encoder.Encode(
-                                            std::move(response));
-                                        // Send via SendBatch
-                                        // For now, just close
+                                        FrameHeader fh;
+                                        fh.type = FrameType::Headers;
+                                        fh.stream_id = 1;
+                                        fh.flags = static_cast<std::uint8_t>(FrameFlags::EndHeaders);
+                                        if (response.body.empty()) fh.flags |= static_cast<std::uint8_t>(FrameFlags::EndStream);
+                                        fh.length = static_cast<std::uint32_t>(hb.size());
+                                        auto frame = FrameCodec::EncodeHeader(fh);
+                                        frame.insert(frame.end(), hb.begin(), hb.end());
+                                        transport::TcpConnection::OutboundBatch batch;
+                                        batch.push_back(std::move(frame));
+                                        if (!response.body.empty())
+                                        {
+                                            FrameHeader df;
+                                            df.type = FrameType::Data;
+                                            df.stream_id = 1;
+                                            df.flags = static_cast<std::uint8_t>(FrameFlags::EndStream);
+                                            df.length = static_cast<std::uint32_t>(response.body.size());
+                                            auto dframe = FrameCodec::EncodeHeader(df);
+                                            dframe.insert(dframe.end(), response.body.begin(), response.body.end());
+                                            batch.push_back(std::move(dframe));
+                                        }
+                                        conn->SendBatch(std::move(batch));
                                     },
                                     [connection_slot](
                                         std::vector<std::byte>
@@ -326,8 +347,12 @@ void HttpServer::OnAccepted(
                                     },
                                     connection_id);
                             session = std::move(h2_session);
+                            const auto preface_sz =
+                                protocol::http2::FrameCodec::kPreface.size();
                             const auto result =
-                                session->Feed(bytes);
+                                session->Feed(bytes.SubView(
+                                    preface_sz,
+                                    bytes.Size() - preface_sz));
                             if (result.status !=
                                 protocol::ProtocolFeedStatus::Ready)
                             {
