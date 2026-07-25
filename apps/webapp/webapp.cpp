@@ -4,6 +4,8 @@
 #include "webapp/webapp.h"
 #include "webapp/board_handlers.h"
 
+#include "core/json_utils.h"
+
 #include "execution/serial_executor.h"
 
 #include <algorithm>
@@ -55,6 +57,8 @@ WebAppServer::WebAppServer(
           std::make_shared<transport::ConnectionRegistry>())
     , router_(
           std::make_shared<protocol::http::HttpRouter>())
+    , timer_service_(
+          std::make_shared<core::TimerService>())
 {
     webapp::SetHomeDirectory(options_.home_directory);
 }
@@ -164,8 +168,8 @@ void WebAppServer::RegisterRoutes()
             const auto session = ExtractSessionId(request);
             if (!session.empty())
             {
-                std::lock_guard lock(auth_mutex_);
-                sessions_.erase(session);
+                std::lock_guard lock(auth_->mutex);
+                auth_->sessions.erase(session);
             }
             return Redirect("/login");
         });
@@ -283,6 +287,73 @@ void WebAppServer::RegisterRoutes()
         HttpMethod::Get, "/style.css",
         [](const HttpRequest&) {
             return webapp::HandleStyles();
+        });
+
+    // --- API routes ---
+
+    // GET /api/posts — 게시글 목록 JSON
+    router.Register(
+        HttpMethod::Get, "/api/posts",
+        [this](const HttpRequest& /*request*/) {
+            const auto posts = GetPosts();
+            std::string json = "[";
+            for (std::size_t i = 0; i < posts.size(); ++i)
+            {
+                if (i > 0) json += ",";
+                json += core::JsonValue::Format({
+                    {"id", std::to_string(posts[i].id)},
+                    {"title", posts[i].title},
+                    {"author", posts[i].author},
+                });
+            }
+            json += "]";
+            return MakeTextResponse(200, json,
+                "application/json; charset=utf-8");
+        });
+
+    // POST /api/posts — 게시글 작성 (JSON body)
+    router.Register(
+        HttpMethod::Post, "/api/posts",
+        [this](const HttpRequest& request) {
+            const auto body = StringFromBytes(request.body);
+            auto j = core::JsonValue::Parse(body);
+            auto title = j.GetString("title");
+            auto content = j.GetString("content");
+            auto author = j.GetString("author", "anonymous");
+
+            if (title.empty() || content.empty())
+            {
+                return MakeTextResponse(400,
+                    core::JsonValue::Format({
+                        {"error", "title and content required"}}),
+                    "application/json; charset=utf-8");
+            }
+
+            auto post = webapp::CreatePost(title, content, author);
+            AddPost(std::move(post));
+            return MakeTextResponse(201,
+                core::JsonValue::Format({{"status", "created"}}),
+                "application/json; charset=utf-8");
+        });
+
+    // GET /api/stream — chunked streaming demo
+    router.Register(
+        HttpMethod::Get, "/api/stream",
+        [](const HttpRequest&) {
+            // pre-encoded chunked response
+            std::string body;
+            static const char* words[] = {"Hello ", "IOCP ", "streaming ", "demo!\n"};
+            for (const auto& w : words)
+            {
+                body += (std::ostringstream{} << std::hex << std::strlen(w) << "\r\n" << w << "\r\n").str();
+            }
+            body += "0\r\n\r\n";
+
+            HttpResponse resp;
+            resp.headers.push_back({"Transfer-Encoding", "chunked"});
+            resp.headers.push_back({"Content-Type", "text/plain; charset=utf-8"});
+            resp.body = BytesFromString(body);
+            return resp;
         });
 
     // GET /
@@ -410,24 +481,33 @@ std::string WebAppServer::GenerateSessionToken() const
 bool WebAppServer::ValidateSession(
     const std::string& token) const
 {
-    std::lock_guard lock(auth_mutex_);
-    return sessions_.find(token) != sessions_.end();
+    std::lock_guard lock(auth_->mutex);
+    return auth_->sessions.find(token) != auth_->sessions.end();
 }
 
 std::string WebAppServer::GetUsername(
     const std::string& token) const
 {
-    std::lock_guard lock(auth_mutex_);
-    const auto found = sessions_.find(token);
-    return found != sessions_.end() ? found->second : "";
+    std::lock_guard lock(auth_->mutex);
+    const auto found = auth_->sessions.find(token);
+    return found != auth_->sessions.end() ? found->second : "";
 }
 
 void WebAppServer::AddSession(
     const std::string& token,
     const std::string& username)
 {
-    std::lock_guard lock(auth_mutex_);
-    sessions_[token] = username;
+    std::lock_guard lock(auth_->mutex);
+    auth_->sessions[token] = username;
+
+    // 1시간 후 session 자동 만료
+    auto auth_copy = auth_;
+    (void)timer_service_->Schedule(
+        std::chrono::hours{1},
+        [auth_copy, token_copy = token] {
+            std::lock_guard lock(auth_copy->mutex);
+            auth_copy->sessions.erase(token_copy);
+        });
 }
 
 std::vector<webapp::Post> WebAppServer::GetPosts() const

@@ -19,6 +19,8 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <atomic>
+#include <string>
 
 namespace iocp::server
 {

@@ -136,6 +136,25 @@ void HttpServer::RegisterRoutes()
             });
             return response;
         });
+
+    // GET /metrics — OpenMetrics-compatible
+    static std::atomic<std::uint64_t> req_count{0};
+    static std::atomic<std::uint64_t> err_count{0};
+    router_->Register(
+        protocol::http::HttpMethod::Get,
+        "/metrics",
+        [](const protocol::http::HttpRequest&) {
+            using namespace protocol::http;
+            auto metrics = std::string(
+                "# HELP iocp_requests_total Total HTTP requests\n"
+                "# TYPE iocp_requests_total counter\n"
+                "iocp_requests_total ") + std::to_string(req_count.load()) + "\n"
+                "# HELP iocp_errors_total Total HTTP errors\n"
+                "# TYPE iocp_errors_total counter\n"
+                "iocp_errors_total " + std::to_string(err_count.load()) + "\n";
+            return MakeTextResponse(200, metrics,
+                "text/plain; charset=utf-8");
+        });
 }
 
 void HttpServer::Start()

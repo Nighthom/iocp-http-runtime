@@ -59,6 +59,8 @@ add_library(iocp_server_core
     src/buffer/ring_receive_buffer.cpp
     src/core/logging.cpp
     src/core/config_utils.cpp
+    src/core/json_utils.cpp
+    src/core/timer_service.cpp
     src/execution/iocp_executor.cpp
     src/execution/manual_executor.cpp
     src/execution/serial_executor.cpp

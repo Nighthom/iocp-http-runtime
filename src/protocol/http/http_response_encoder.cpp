@@ -116,12 +116,29 @@ EncodedHttpResponse HttpResponseEncoder::Encode(
         head += header.name + ": " + header.value + "\r\n";
     }
 
+    bool has_transfer_encoding = false;
+    for (const HttpHeader& header : response.headers)
+    {
+        if (Lowercase(header.name) == "transfer-encoding")
+        {
+            has_transfer_encoding = true;
+            break;
+        }
+    }
+
     if (!has_server)
     {
         head += "Server: " + options_.server_name + "\r\n";
     }
-    head += "Content-Length: " +
-        std::to_string(response.body.size()) + "\r\n";
+    if (has_transfer_encoding)
+    {
+        head += "Transfer-Encoding: chunked\r\n";
+    }
+    else
+    {
+        head += "Content-Length: " +
+            std::to_string(response.body.size()) + "\r\n";
+    }
     head += response.close_connection
         ? "Connection: close\r\n"
         : "Connection: keep-alive\r\n";
