@@ -3,8 +3,12 @@
 
 #include "webapp/webapp.h"
 #include "webapp/board_handlers.h"
+#include "webapp/multipart.h"
 
 #include "core/json_utils.h"
+
+#include <filesystem>
+#include <fstream>
 
 #include "execution/serial_executor.h"
 
@@ -354,6 +358,39 @@ void WebAppServer::RegisterRoutes()
             resp.headers.push_back({"Content-Type", "text/plain; charset=utf-8"});
             resp.body = BytesFromString(body);
             return resp;
+        });
+
+    // POST /api/upload — file upload
+    router.Register(
+        HttpMethod::Post, "/api/upload",
+        [this](const HttpRequest& req) {
+            using namespace protocol::http;
+            const auto ct = req.Header("content-type").value_or("");
+            const auto bpos = ct.find("boundary=");
+            if (bpos == std::string_view::npos)
+                return MakeTextResponse(400, "{\"error\":\"no boundary\"}",
+                    "application/json; charset=utf-8");
+            auto boundary = std::string(ct.substr(bpos + 9));
+            if (boundary.size() >= 2 && boundary.front() == '"')
+                boundary = boundary.substr(1, boundary.size() - 2);
+            try {
+                MultipartParser parser(boundary);
+                parser.Feed(StringFromBytes(req.body));
+                if (parser.Files().empty())
+                    return MakeTextResponse(400, "{\"error\":\"no file\"}",
+                        "application/json; charset=utf-8");
+                const auto& f = parser.Files()[0];
+                std::filesystem::create_directories("uploads");
+                std::ofstream out("uploads/" + f.filename, std::ios::binary);
+                out.write(reinterpret_cast<const char*>(f.data.data()),
+                    static_cast<std::streamsize>(f.data.size()));
+                return MakeTextResponse(200,
+                    "{\"ok\":true,\"file\":\"uploads/" + f.filename + "\"}",
+                    "application/json; charset=utf-8");
+            } catch (...) {
+                return MakeTextResponse(500, "{\"error\":\"upload error\"}",
+                    "application/json; charset=utf-8");
+            }
         });
 
     // GET /

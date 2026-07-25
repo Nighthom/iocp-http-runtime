@@ -157,6 +157,7 @@ add_library(iocp_webapp
     apps/webapp/board_handlers.cpp
     apps/webapp/configuration.cpp
     apps/webapp/db.cpp
+    apps/webapp/multipart.cpp
 )
 target_link_libraries(
     iocp_webapp
