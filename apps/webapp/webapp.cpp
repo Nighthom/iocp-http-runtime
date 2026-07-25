@@ -336,6 +336,26 @@ void WebAppServer::RegisterRoutes()
                 "application/json; charset=utf-8");
         });
 
+    // GET /api/stream — chunked streaming demo
+    router.Register(
+        HttpMethod::Get, "/api/stream",
+        [](const HttpRequest&) {
+            // pre-encoded chunked response
+            std::string body;
+            static const char* words[] = {"Hello ", "IOCP ", "streaming ", "demo!\n"};
+            for (const auto& w : words)
+            {
+                body += (std::ostringstream{} << std::hex << std::strlen(w) << "\r\n" << w << "\r\n").str();
+            }
+            body += "0\r\n\r\n";
+
+            HttpResponse resp;
+            resp.headers.push_back({"Transfer-Encoding", "chunked"});
+            resp.headers.push_back({"Content-Type", "text/plain; charset=utf-8"});
+            resp.body = BytesFromString(body);
+            return resp;
+        });
+
     // GET /
     router.Register(
         HttpMethod::Get, "/",
