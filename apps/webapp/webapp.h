@@ -29,6 +29,16 @@
 namespace iocp::server
 {
 
+struct AuthState final
+{
+    std::mutex mutex;
+    std::unordered_map<std::string, std::string> sessions;
+    std::unordered_map<std::string, std::string> users{
+        {"admin", "admin123"},
+        {"user", "pass123"},
+    };
+};
+
 struct WebAppOptions final
 {
     std::string home_directory{"apps/webapp/templates"};
@@ -98,13 +108,8 @@ private:
     enum class State { Created, Running, Stopping, Stopped };
     State state_{State::Created};
 
-    mutable std::mutex auth_mutex_;
-    std::unordered_map<std::string, std::string> sessions_;
-    std::unordered_map<std::string, std::string> users_{
-        {"admin", "admin123"},
-        {"user", "pass123"},
-    };
-
+    std::shared_ptr<AuthState> auth_{
+        std::make_shared<AuthState>()};
     mutable std::mutex board_mutex_;
     std::vector<webapp::Post> posts_;
     std::atomic<std::uint64_t> next_post_id_{1};

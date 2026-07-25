@@ -168,8 +168,8 @@ void WebAppServer::RegisterRoutes()
             const auto session = ExtractSessionId(request);
             if (!session.empty())
             {
-                std::lock_guard lock(auth_mutex_);
-                sessions_.erase(session);
+                std::lock_guard lock(auth_->mutex);
+                auth_->sessions.erase(session);
             }
             return Redirect("/login");
         });
@@ -461,33 +461,32 @@ std::string WebAppServer::GenerateSessionToken() const
 bool WebAppServer::ValidateSession(
     const std::string& token) const
 {
-    std::lock_guard lock(auth_mutex_);
-    return sessions_.find(token) != sessions_.end();
+    std::lock_guard lock(auth_->mutex);
+    return auth_->sessions.find(token) != auth_->sessions.end();
 }
 
 std::string WebAppServer::GetUsername(
     const std::string& token) const
 {
-    std::lock_guard lock(auth_mutex_);
-    const auto found = sessions_.find(token);
-    return found != sessions_.end() ? found->second : "";
+    std::lock_guard lock(auth_->mutex);
+    const auto found = auth_->sessions.find(token);
+    return found != auth_->sessions.end() ? found->second : "";
 }
 
 void WebAppServer::AddSession(
     const std::string& token,
     const std::string& username)
 {
-    std::lock_guard lock(auth_mutex_);
-    sessions_[token] = username;
+    std::lock_guard lock(auth_->mutex);
+    auth_->sessions[token] = username;
 
     // 1시간 후 session 자동 만료
-    auto weak_token = std::weak_ptr<std::string>(
-        std::make_shared<std::string>(token));
+    auto auth_copy = auth_;
     (void)timer_service_->Schedule(
         std::chrono::hours{1},
-        [this, token_copy = token] {
-            std::lock_guard lock2(auth_mutex_);
-            sessions_.erase(token_copy);
+        [auth_copy, token_copy = token] {
+            std::lock_guard lock(auth_copy->mutex);
+            auth_copy->sessions.erase(token_copy);
         });
 }
 
