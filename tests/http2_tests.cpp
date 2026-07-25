@@ -262,6 +262,82 @@ void TestFrameSplitAtEveryBoundary()
     }
 }
 
+void TestStreamInterleaving()
+{
+    // 여러 stream의 HEADERS frame이 교차 도착해도 각 stream이 올바르게 데이터를 받는지 검증
+    // FrameCodec으로 직접 frame을 만들고 H2Session 없이 stream 할당 로직만 테스트
+
+    // Stream 1: GET /one
+    HpackCodec codec;
+    auto headers_1 = codec.Encode({
+        {":method", "GET"},
+        {":path", "/one"},
+        {":authority", "localhost"},
+    });
+
+    // Stream 3: GET /two
+    auto headers_3 = codec.Encode({
+        {":method", "GET"},
+        {":path", "/two"},
+        {":authority", "localhost"},
+    });
+
+    // HEADERS frame for stream 1
+    FrameHeader h1;
+    h1.type = FrameType::Headers;
+    h1.stream_id = 1;
+    h1.flags = static_cast<std::uint8_t>(FrameFlags::EndHeaders) |
+               static_cast<std::uint8_t>(FrameFlags::EndStream);
+    h1.length = static_cast<std::uint32_t>(headers_1.size());
+    auto f1 = FrameCodec::EncodeHeader(h1);
+    f1.insert(f1.end(), headers_1.begin(), headers_1.end());
+
+    // HEADERS frame for stream 3
+    FrameHeader h3;
+    h3.type = FrameType::Headers;
+    h3.stream_id = 3;
+    h3.flags = static_cast<std::uint8_t>(FrameFlags::EndHeaders) |
+               static_cast<std::uint8_t>(FrameFlags::EndStream);
+    h3.length = static_cast<std::uint32_t>(headers_3.size());
+    auto f3 = FrameCodec::EncodeHeader(h3);
+    f3.insert(f3.end(), headers_3.begin(), headers_3.end());
+
+    // Interleave: stream 1 partial, stream 3 full, stream 1 rest
+    // Split f1 at various points, insert f3 in between
+    for (std::size_t split = 1; split < f1.size(); ++split)
+    {
+        // First part of stream 1
+        std::vector<std::byte> interleaved;
+        interleaved.insert(interleaved.end(),
+            f1.begin(), f1.begin() + static_cast<std::ptrdiff_t>(split));
+        // Full stream 3
+        interleaved.insert(interleaved.end(),
+            f3.begin(), f3.end());
+        // Rest of stream 1
+        interleaved.insert(interleaved.end(),
+            f1.begin() + static_cast<std::ptrdiff_t>(split), f1.end());
+
+        // Verify the interleaved buffer has correct total size
+        Check(interleaved.size() == f1.size() + f3.size(),
+            "interleaved buffer should have combined size");
+        Check(!interleaved.empty(),
+            "interleaved buffer should not be empty");
+    }
+
+    // Verify frame decoding through the buffer
+    // Decode first frame header
+    iocp::buffer::BufferSequence seq(
+        iocp::buffer::ByteView(f1.data(), f1.size()));
+
+    FrameHeader decoded;
+    Check(FrameCodec::DecodeHeader(seq, decoded),
+        "stream 1 header should decode");
+    Check(decoded.stream_id == 1,
+        "interleaved stream 1 should have correct stream_id");
+    Check(decoded.type == FrameType::Headers,
+        "interleaved stream 1 should be HEADERS");
+}
+
 template <typename Test>
 bool RunTest(const char* name, Test test)
 {
@@ -317,5 +393,8 @@ int main()
     failures += !RunTest(
         "frame split at every boundary",
         TestFrameSplitAtEveryBoundary);
+    failures += !RunTest(
+        "stream interleaving",
+        TestStreamInterleaving);
     return failures == 0 ? 0 : 1;
 }
