@@ -298,15 +298,16 @@ private:
             for (int b = static_cast<int>(bits) - 1; b >= 0; --b)
             {
                 const int bit = (static_cast<int>(code) >> b) & 1;
-                int& child = bit == 0
+                int next = bit == 0
                     ? nodes_[current].left
                     : nodes_[current].right;
-                if (child < 0)
+                if (next < 0)
                 {
-                    child = static_cast<int>(nodes_.size());
+                    next = static_cast<int>(nodes_.size());
                     nodes_.push_back({});
+                    (bit == 0 ? nodes_[current].left : nodes_[current].right) = next;
                 }
-                current = child;
+                current = next;
             }
             nodes_[current].value = symbol;
         }

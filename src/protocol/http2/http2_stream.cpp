@@ -501,48 +501,46 @@ ProtocolFeedStatus H2Session::HandleHeaders(
             bool has_method = false;
             bool has_path = false;
 
-            for (const auto& header : decoded)
+            for (const auto& hdr : decoded)
             {
-                if (header.name == ":method")
+                if (hdr.name == ":method")
                 {
                     request.method =
-                        http::ParseMethod(header.value);
-                    request.method_text = header.value;
+                        http::ParseMethod(hdr.value);
+                    request.method_text = hdr.value;
                     has_method = true;
                 }
-                else if (header.name == ":path")
+                else if (hdr.name == ":path")
                 {
-                    request.target = header.value;
+                    request.target = hdr.value;
                     const auto qpos =
-                        header.value.find('?');
+                        hdr.value.find('?');
                     if (qpos != std::string::npos)
                     {
                         request.path =
-                            header.value.substr(0, qpos);
+                            hdr.value.substr(0, qpos);
                         request.query =
-                            header.value.substr(qpos + 1);
+                            hdr.value.substr(qpos + 1);
                     }
                     else
                     {
-                        request.path = header.value;
+                        request.path = hdr.value;
                     }
                     has_path = true;
                 }
-                else if (header.name == ":authority")
+                else if (hdr.name == ":authority")
                 {
                     request.headers.push_back(
-                        {"host", header.value});
+                        {"host", hdr.value});
                 }
-                else if (header.name == ":scheme")
+                else if (hdr.name == ":scheme")
                 {
-                    // Store as header for reference
                     request.headers.push_back(
-                        {":scheme", header.value});
+                        {":scheme", hdr.value});
                 }
-                else if (header.name[0] != ':')
+                else if (hdr.name[0] != ':')
                 {
-                    // Regular headers
-                    request.headers.push_back(header);
+                    request.headers.push_back(hdr);
                 }
             }
 
@@ -656,7 +654,7 @@ ProtocolFeedStatus H2Session::HandleData(
     // Send WINDOW_UPDATE if needed
     if (connection_recv_window_ < 32768)
     {
-        const auto payload = FrameCodec::EncodeWindowUpdate(
+        const auto wu_bytes = FrameCodec::EncodeWindowUpdate(
             config_.initial_window_size -
             connection_recv_window_);
         connection_recv_window_ =
@@ -666,10 +664,10 @@ ProtocolFeedStatus H2Session::HandleData(
         wu_header.type = FrameType::WindowUpdate;
         wu_header.stream_id = 0;
         wu_header.length =
-            static_cast<std::uint32_t>(payload.size());
+            static_cast<std::uint32_t>(wu_bytes.size());
         auto frame = FrameCodec::EncodeHeader(wu_header);
         frame.insert(
-            frame.end(), payload.begin(), payload.end());
+            frame.end(), wu_bytes.begin(), wu_bytes.end());
         frame_sender_(std::move(frame));
     }
 
