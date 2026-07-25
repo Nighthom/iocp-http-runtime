@@ -54,7 +54,7 @@ endif()
 
 function(iocp_enable_project_warnings target)
     if(MSVC)
-        target_compile_options(${target} PRIVATE /W4 /permissive- /EHsc /utf-8)
+        target_compile_options(${target} PRIVATE /W4 /permissive- /EHsc /utf-8 /DNOMINMAX)
         if(IOCP_WARNINGS_AS_ERRORS)
             target_compile_options(${target} PRIVATE /WX)
         endif()
