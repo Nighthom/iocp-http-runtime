@@ -59,6 +59,7 @@ WebAppServer::WebAppServer(
           std::make_shared<protocol::http::HttpRouter>())
     , timer_service_(
           std::make_shared<core::TimerService>())
+    , db_(std::make_unique<Database>("webapp.db"))
 {
     webapp::SetHomeDirectory(options_.home_directory);
 }
@@ -168,8 +169,7 @@ void WebAppServer::RegisterRoutes()
             const auto session = ExtractSessionId(request);
             if (!session.empty())
             {
-                std::lock_guard lock(auth_->mutex);
-                auth_->sessions.erase(session);
+                db_->DeleteSession(session);
             }
             return Redirect("/login");
         });
@@ -481,48 +481,51 @@ std::string WebAppServer::GenerateSessionToken() const
 bool WebAppServer::ValidateSession(
     const std::string& token) const
 {
-    std::lock_guard lock(auth_->mutex);
-    return auth_->sessions.find(token) != auth_->sessions.end();
+    return !db_->LoadSession(token).empty();
 }
 
 std::string WebAppServer::GetUsername(
     const std::string& token) const
 {
-    std::lock_guard lock(auth_->mutex);
-    const auto found = auth_->sessions.find(token);
-    return found != auth_->sessions.end() ? found->second : "";
+    return db_->LoadSession(token);
 }
 
 void WebAppServer::AddSession(
     const std::string& token,
     const std::string& username)
 {
-    std::lock_guard lock(auth_->mutex);
-    auth_->sessions[token] = username;
+    db_->SaveSession(token, username);
 
     // 1시간 후 session 자동 만료
-    auto auth_copy = auth_;
+    auto db_ptr = db_.get();
     (void)timer_service_->Schedule(
         std::chrono::hours{1},
-        [auth_copy, token_copy = token] {
-            std::lock_guard lock(auth_copy->mutex);
-            auth_copy->sessions.erase(token_copy);
+        [db_ptr, token_copy = token] {
+            db_ptr->DeleteSession(token_copy);
         });
 }
 
 std::vector<webapp::Post> WebAppServer::GetPosts() const
 {
-    std::lock_guard lock(board_mutex_);
-    auto posts = posts_;
-    std::reverse(posts.begin(), posts.end());
-    if (posts.size() > 50) posts.resize(50);
-    return posts;
+    // DB에서 읽어서 webapp::Post로 변환
+    auto db_posts = db_->GetPosts(50);
+    std::vector<webapp::Post> result;
+    result.reserve(db_posts.size());
+    for (const auto& p : db_posts)
+    {
+        webapp::Post wp;
+        wp.id = p.id;
+        wp.title = p.title;
+        wp.author = p.author;
+        wp.content = p.content;
+        result.push_back(std::move(wp));
+    }
+    return result;
 }
 
 void WebAppServer::AddPost(webapp::Post post)
 {
-    std::lock_guard lock(board_mutex_);
-    posts_.push_back(std::move(post));
+    (void)db_->InsertPost(post.title, post.author, post.content);
 }
 
 } // namespace iocp::server

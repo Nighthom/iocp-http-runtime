@@ -6,6 +6,7 @@
 #include "core/logging.h"
 #include "core/timer_service.h"
 #include "execution/thread_pool_executor.h"
+#include "webapp/db.h"
 #include "platform/windows/winsock_runtime.h"
 #include "protocol/http/http_response_encoder.h"
 #include "protocol/http/http_router.h"
@@ -16,7 +17,6 @@
 #include "transport/tcp_listener.h"
 #include "webapp/board_handlers.h"
 
-#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -28,16 +28,6 @@
 
 namespace iocp::server
 {
-
-struct AuthState final
-{
-    std::mutex mutex;
-    std::unordered_map<std::string, std::string> sessions;
-    std::unordered_map<std::string, std::string> users{
-        {"admin", "admin123"},
-        {"user", "pass123"},
-    };
-};
 
 struct WebAppOptions final
 {
@@ -102,17 +92,12 @@ private:
     std::shared_ptr<protocol::http::HttpRouter> router_;
     std::shared_ptr<transport::TcpListener> listener_;
     std::shared_ptr<core::TimerService> timer_service_;
+    std::unique_ptr<Database> db_;
 
     mutable std::mutex state_mutex_;
     std::mutex stop_mutex_;
     enum class State { Created, Running, Stopping, Stopped };
     State state_{State::Created};
-
-    std::shared_ptr<AuthState> auth_{
-        std::make_shared<AuthState>()};
-    mutable std::mutex board_mutex_;
-    std::vector<webapp::Post> posts_;
-    std::atomic<std::uint64_t> next_post_id_{1};
 };
 
 } // namespace iocp::server
