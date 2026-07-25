@@ -2,6 +2,7 @@
 // 설정 간 consistency를 검증한다.
 
 #include "http_server/configuration.h"
+#include "core/config_utils.h"
 
 #include <toml++/toml.hpp>
 
@@ -10,7 +11,6 @@
 #endif
 #include <WinSock2.h>
 
-#include <charconv>
 #include <chrono>
 #include <climits>
 #include <cstdint>
@@ -28,37 +28,13 @@ namespace
 
 constexpr std::int64_t kSchemaVersion = 1;
 
-std::uint64_t ParseUnsigned(
-    const std::string_view name,
-    const std::string_view value,
-    const std::uint64_t maximum,
-    const bool allow_zero)
-{
-    std::uint64_t parsed = 0;
-    const auto result = std::from_chars(
-        value.data(),
-        value.data() + value.size(),
-        parsed);
-    if (value.empty() ||
-        result.ec != std::errc{} ||
-        result.ptr != value.data() + value.size() ||
-        (!allow_zero && parsed == 0) ||
-        parsed > maximum)
-    {
-        throw std::invalid_argument(
-            std::string{name} + " is outside its valid range: " +
-            std::string{value});
-    }
-    return parsed;
-}
-
 void ApplyOption(
     HttpApplicationOptions& options,
     const std::string_view name,
     const std::string_view value)
 {
     const auto ToSize = [&](const bool allow_zero = false) {
-        return static_cast<std::size_t>(ParseUnsigned(
+        return static_cast<std::size_t>(core::ParseUnsigned(
             name,
             value,
             std::numeric_limits<std::size_t>::max(),
@@ -77,12 +53,12 @@ void ApplyOption(
     {
         options.server.listener.port =
             static_cast<std::uint16_t>(
-                ParseUnsigned(name, value, 65535, true));
+                core::ParseUnsigned(name, value, 65535, true));
     }
     else if (name == "backlog")
     {
         options.server.listener.backlog = static_cast<int>(
-            ParseUnsigned(name, value, INT_MAX, false));
+            core::ParseUnsigned(name, value, INT_MAX, false));
     }
     else if (name == "io-workers")
     {
@@ -104,7 +80,7 @@ void ApplyOption(
     {
         options.server.connection.receive_chunk_bytes =
             static_cast<std::size_t>(
-                ParseUnsigned(name, value, ULONG_MAX, false));
+                core::ParseUnsigned(name, value, ULONG_MAX, false));
     }
     else if (name == "send-queue-items")
     {
@@ -119,7 +95,7 @@ void ApplyOption(
         options.server.connection
             .maximum_gather_segments_per_operation =
             static_cast<std::size_t>(
-                ParseUnsigned(
+                core::ParseUnsigned(
                     name,
                     value,
                     std::numeric_limits<DWORD>::max(),
@@ -129,7 +105,7 @@ void ApplyOption(
     {
         options.server.connection.maximum_gather_bytes_per_operation =
             static_cast<std::size_t>(
-                ParseUnsigned(name, value, ULONG_MAX, false));
+                core::ParseUnsigned(name, value, ULONG_MAX, false));
     }
     else if (name == "outbound-batch-segments")
     {
@@ -187,67 +163,13 @@ void ApplyOption(
             std::chrono::milliseconds::max().count());
         options.server.shutdown_timeout =
             std::chrono::milliseconds{static_cast<Rep>(
-                ParseUnsigned(name, value, maximum, false))};
+                core::ParseUnsigned(name, value, maximum, false))};
     }
     else
     {
         throw std::invalid_argument(
             "unknown HTTP server option: " + std::string{name});
     }
-}
-
-bool IsAllowed(
-    const std::string_view key,
-    const std::initializer_list<std::string_view> allowed)
-{
-    for (const std::string_view candidate : allowed)
-    {
-        if (key == candidate)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
-void RejectUnknownKeys(
-    const toml::table& table,
-    const std::string_view section,
-    const std::initializer_list<std::string_view> allowed)
-{
-    for (const auto& [key, value] : table)
-    {
-        static_cast<void>(value);
-        if (!IsAllowed(key.str(), allowed))
-        {
-            const std::string prefix =
-                section.empty()
-                ? std::string{}
-                : std::string{section} + ".";
-            throw std::invalid_argument(
-                "unknown TOML key: " + prefix +
-                std::string{key.str()});
-        }
-    }
-}
-
-const toml::table* OptionalTable(
-    const toml::table& parent,
-    const std::string_view key,
-    const std::string_view qualified_name)
-{
-    const toml::node* node = parent.get(key);
-    if (node == nullptr)
-    {
-        return nullptr;
-    }
-    const toml::table* table = node->as_table();
-    if (table == nullptr)
-    {
-        throw std::invalid_argument(
-            std::string{qualified_name} + " must be a TOML table");
-    }
-    return table;
 }
 
 void ApplyInteger(
@@ -257,13 +179,12 @@ void ApplyInteger(
     const std::string_view qualified_name,
     const std::string_view option_name)
 {
-    const toml::node* node = table.get(key);
-    if (node == nullptr)
+    const auto value = core::ReadTomlInt(table, key);
+    if (!value)
     {
         return;
     }
-    const auto value = node->value_exact<std::int64_t>();
-    if (!value || *value < 0)
+    if (*value < 0)
     {
         throw std::invalid_argument(
             std::string{qualified_name} +
@@ -276,19 +197,13 @@ void ApplyString(
     HttpApplicationOptions& options,
     const toml::table& table,
     const std::string_view key,
-    const std::string_view qualified_name,
+    const std::string_view /*qualified_name*/,
     const std::string_view option_name)
 {
-    const toml::node* node = table.get(key);
-    if (node == nullptr)
-    {
-        return;
-    }
-    const auto value = node->value_exact<std::string>();
+    const auto value = core::ReadTomlStr(table, key);
     if (!value)
     {
-        throw std::invalid_argument(
-            std::string{qualified_name} + " must be a string");
+        return;
     }
     ApplyOption(options, option_name, *value);
 }
@@ -297,15 +212,14 @@ void ApplyConnectionTable(
     HttpApplicationOptions& options,
     const toml::table& server)
 {
-    const toml::table* connection =
-        OptionalTable(server, "connection", "server.connection");
+    const auto* connection =
+        core::OptionalTable(server, "connection");
     if (!connection)
     {
         return;
     }
-    RejectUnknownKeys(
+    core::RejectUnknownKeys(
         *connection,
-        "server.connection",
         {
             "receive_chunk_bytes",
             "send_queue_items",
@@ -356,15 +270,14 @@ void ApplyServerTable(
     HttpApplicationOptions& options,
     const toml::table& root)
 {
-    const toml::table* server =
-        OptionalTable(root, "server", "server");
+    const auto* server =
+        core::OptionalTable(root, "server");
     if (!server)
     {
         return;
     }
-    RejectUnknownKeys(
+    core::RejectUnknownKeys(
         *server,
-        "server",
         {
             "address",
             "port",
@@ -419,15 +332,14 @@ void ApplyHttpTable(
     HttpApplicationOptions& options,
     const toml::table& root)
 {
-    const toml::table* http =
-        OptionalTable(root, "http", "http");
+    const auto* http =
+        core::OptionalTable(root, "http");
     if (!http)
     {
         return;
     }
-    RejectUnknownKeys(
+    core::RejectUnknownKeys(
         *http,
-        "http",
         {
             "initial_buffer_bytes",
             "maximum_buffer_bytes",
@@ -511,11 +423,10 @@ void ApplyToml(
             std::string{error.description()});
     }
 
-    RejectUnknownKeys(
+    core::RejectUnknownKeys(
         root,
-        "",
         {"schema_version", "server", "http"});
-    if (const toml::node* node = root.get("schema_version"))
+    if (const auto* node = root.get("schema_version"))
     {
         const auto version =
             node->value_exact<std::int64_t>();
@@ -527,41 +438,6 @@ void ApplyToml(
     }
     ApplyServerTable(options, root);
     ApplyHttpTable(options, root);
-}
-
-std::optional<std::filesystem::path> FindConfigFile(
-    const std::vector<std::string_view>& arguments)
-{
-    std::optional<std::filesystem::path> path;
-    for (std::size_t index = 0; index < arguments.size(); ++index)
-    {
-        const std::string_view argument = arguments[index];
-        std::string_view value;
-        if (argument == "--config")
-        {
-            if (++index >= arguments.size())
-            {
-                throw std::invalid_argument(
-                    "--config requires a path");
-            }
-            value = arguments[index];
-        }
-        else if (argument.rfind("--config=", 0) == 0)
-        {
-            value = argument.substr(9);
-        }
-        else
-        {
-            continue;
-        }
-        if (path || value.empty())
-        {
-            throw std::invalid_argument(
-                "--config must specify one non-empty path");
-        }
-        path = value;
-    }
-    return path;
 }
 
 void ApplyCommandLine(
@@ -708,7 +584,9 @@ HttpApplicationOptions LoadHttpApplicationOptions(
     const std::vector<std::string_view>& arguments)
 {
     HttpApplicationOptions options;
-    options.config_file = FindConfigFile(arguments);
+    const core::CliParser cli(arguments);
+    options.show_help = cli.show_help;
+    options.config_file = core::FindConfigFile(cli, "http_server.toml");
     if (options.config_file)
     {
         ApplyToml(options, *options.config_file);

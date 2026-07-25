@@ -234,7 +234,7 @@ bool RunTest(const char* name, Test test)
 
 int main()
 {
-    iocp::webapp::SetTemplateDirectory(
+    iocp::webapp::SetHomeDirectory(
         std::string(IOCP_SOURCE_DIR) + "/apps/webapp/templates");
 
     int failures = 0;

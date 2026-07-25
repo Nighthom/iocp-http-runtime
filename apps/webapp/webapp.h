@@ -30,16 +30,11 @@ namespace iocp::server
 
 struct WebAppOptions final
 {
-    std::size_t io_worker_count{2};
-    std::size_t application_worker_count{2};
-    std::size_t maximum_application_tasks{1024};
-    std::size_t maximum_connection_tasks{128};
-    std::string template_directory{"apps/webapp/templates"};
+    std::string home_directory{"apps/webapp/templates"};
     transport::ListenerOptions listener;
-    transport::ConnectionOptions connection;
-    protocol::http::HttpSessionOptions session;
     std::chrono::milliseconds shutdown_timeout{
         std::chrono::seconds{10}};
+    // 나머지(io_workers, http parser, connection 등)는 httpserver 기본값 사용
 };
 
 /// @brief template 기반 게시판 + 로그인 웹 애플리케이션 서버.

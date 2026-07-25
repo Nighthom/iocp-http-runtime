@@ -58,6 +58,7 @@ add_library(iocp_server_core
     src/buffer/receive_buffer.cpp
     src/buffer/ring_receive_buffer.cpp
     src/core/logging.cpp
+    src/core/config_utils.cpp
     src/execution/iocp_executor.cpp
     src/execution/manual_executor.cpp
     src/execution/serial_executor.cpp
@@ -85,7 +86,7 @@ add_library(iocp_server_core
 
 target_compile_features(iocp_server_core PUBLIC cxx_std_17)
 target_include_directories(iocp_server_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(iocp_server_core PUBLIC Threads::Threads ws2_32)
+target_link_libraries(iocp_server_core PUBLIC Threads::Threads ws2_32 tomlplusplus::tomlplusplus)
 
 add_library(iocp_echo_application
     apps/echo_server/configuration.cpp
@@ -132,16 +133,22 @@ target_link_libraries(iocp_http_server PRIVATE iocp_http_application)
 add_library(iocp_webapp
     apps/webapp/webapp.cpp
     apps/webapp/board_handlers.cpp
+    apps/webapp/configuration.cpp
 )
 target_link_libraries(
     iocp_webapp
     PUBLIC iocp_server_core
+    PRIVATE tomlplusplus::tomlplusplus
 )
 target_include_directories(
     iocp_webapp
     PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/apps"
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_compile_definitions(
+    iocp_webapp
+    PRIVATE IOCP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
 
 add_executable(iocp_webapp_server apps/webapp/main.cpp)
@@ -248,3 +255,18 @@ if(BUILD_TESTING)
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test")
     endforeach()
 endif()
+
+# --- Install: 배포용 레이아웃 ---
+# cmake --install build/windows-release --prefix dist
+
+# 서버/클라 실행파일
+install(TARGETS iocp_echo_server iocp_echo_client iocp_http_server iocp_webapp_server
+    RUNTIME DESTINATION bin)
+
+# config 파일
+install(FILES config/echo_server.toml config/http_server.toml config/webapp.toml
+    DESTINATION config)
+
+# webapp templates
+install(DIRECTORY apps/webapp/templates/
+    DESTINATION share/webapp/templates)

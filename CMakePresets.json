@@ -52,5 +52,12 @@
         "outputOnFailure": true
       }
     }
+  ],
+  "packagePresets": [
+    {
+      "name": "windows-release",
+      "configurePreset": "windows-release",
+      "generators": ["ZIP"]
+    }
   ]
 }
