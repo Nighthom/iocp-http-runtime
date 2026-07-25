@@ -4,6 +4,8 @@
 #include "webapp/webapp.h"
 #include "webapp/board_handlers.h"
 
+#include "core/json_utils.h"
+
 #include "execution/serial_executor.h"
 
 #include <algorithm>
@@ -283,6 +285,53 @@ void WebAppServer::RegisterRoutes()
         HttpMethod::Get, "/style.css",
         [](const HttpRequest&) {
             return webapp::HandleStyles();
+        });
+
+    // --- API routes ---
+
+    // GET /api/posts — 게시글 목록 JSON
+    router.Register(
+        HttpMethod::Get, "/api/posts",
+        [this](const HttpRequest& /*request*/) {
+            const auto posts = GetPosts();
+            std::string json = "[";
+            for (std::size_t i = 0; i < posts.size(); ++i)
+            {
+                if (i > 0) json += ",";
+                json += core::JsonValue::Format({
+                    {"id", std::to_string(posts[i].id)},
+                    {"title", posts[i].title},
+                    {"author", posts[i].author},
+                });
+            }
+            json += "]";
+            return MakeTextResponse(200, json,
+                "application/json; charset=utf-8");
+        });
+
+    // POST /api/posts — 게시글 작성 (JSON body)
+    router.Register(
+        HttpMethod::Post, "/api/posts",
+        [this](const HttpRequest& request) {
+            const auto body = StringFromBytes(request.body);
+            auto j = core::JsonValue::Parse(body);
+            auto title = j.GetString("title");
+            auto content = j.GetString("content");
+            auto author = j.GetString("author", "anonymous");
+
+            if (title.empty() || content.empty())
+            {
+                return MakeTextResponse(400,
+                    core::JsonValue::Format({
+                        {"error", "title and content required"}}),
+                    "application/json; charset=utf-8");
+            }
+
+            auto post = webapp::CreatePost(title, content, author);
+            AddPost(std::move(post));
+            return MakeTextResponse(201,
+                core::JsonValue::Format({{"status", "created"}}),
+                "application/json; charset=utf-8");
         });
 
     // GET /
