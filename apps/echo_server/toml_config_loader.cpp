@@ -2,12 +2,12 @@
 // value type을 엄격하게 검증한 뒤 ConfigurationOverride 목록으로 변환한다.
 
 #include "echo_server/toml_config_loader.h"
+#include "core/config_utils.h"
 
 #include <toml++/toml.hpp>
 
 #include <cstdint>
 #include <initializer_list>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -21,79 +21,16 @@ namespace
 
 constexpr std::int64_t kSupportedSchemaVersion = 1;
 
-bool IsAllowedKey(
-    const std::string_view key,
-    const std::initializer_list<std::string_view> allowed)
-{
-    for (const std::string_view candidate : allowed)
-    {
-        if (key == candidate)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
-void RejectUnknownKeys(
-    const toml::table& table,
-    const std::string_view section,
-    const std::initializer_list<std::string_view> allowed)
-{
-    for (const auto& [key, value] : table)
-    {
-        static_cast<void>(value);
-        const std::string_view key_name = key.str();
-        if (!IsAllowedKey(key_name, allowed))
-        {
-            const std::string prefix =
-                section.empty() ? std::string{} : std::string{section} + ".";
-            throw std::invalid_argument(
-                "알 수 없는 TOML 설정입니다: " + prefix +
-                std::string{key_name});
-        }
-    }
-}
-
-const toml::table* OptionalTable(
-    const toml::table& parent,
-    const std::string_view key,
-    const std::string_view qualified_name)
-{
-    const toml::node* node = parent.get(key);
-    if (node == nullptr)
-    {
-        return nullptr;
-    }
-
-    const toml::table* table = node->as_table();
-    if (table == nullptr)
-    {
-        throw std::invalid_argument(
-            std::string{qualified_name} + "은 TOML table이어야 합니다");
-    }
-    return table;
-}
-
 void AddInteger(
     const toml::table& table,
     const std::string_view key,
-    const std::string_view qualified_name,
     const std::string_view option_name,
     std::vector<ConfigurationOverride>& output)
 {
-    const toml::node* node = table.get(key);
-    if (node == nullptr)
-    {
-        return;
-    }
-
-    const std::optional<std::int64_t> value =
-        node->value_exact<std::int64_t>();
+    const auto value = core::ReadTomlInt(table, key);
     if (!value)
     {
-        throw std::invalid_argument(
-            std::string{qualified_name} + "은 정수여야 합니다");
+        return;
     }
     output.push_back(
         {std::string{option_name}, std::to_string(*value)});
@@ -125,40 +62,23 @@ void AddBoolean(
 void AddString(
     const toml::table& table,
     const std::string_view key,
-    const std::string_view qualified_name,
     const std::string_view option_name,
     std::vector<ConfigurationOverride>& output)
 {
-    const toml::node* node = table.get(key);
-    if (node == nullptr)
-    {
-        return;
-    }
-
-    const std::optional<std::string> value =
-        node->value_exact<std::string>();
+    const auto value = core::ReadTomlStr(table, key);
     if (!value)
     {
-        throw std::invalid_argument(
-            std::string{qualified_name} + "은 문자열이어야 합니다");
+        return;
     }
     output.push_back({std::string{option_name}, *value});
 }
 
 void ReadSchemaVersion(const toml::table& root)
 {
-    const toml::node* node = root.get("schema_version");
-    if (node == nullptr)
-    {
-        return;
-    }
-
-    const std::optional<std::int64_t> version =
-        node->value_exact<std::int64_t>();
+    const auto version = core::ReadTomlInt(root, "schema_version");
     if (!version)
     {
-        throw std::invalid_argument(
-            "schema_version은 정수여야 합니다");
+        return;
     }
     if (*version != kSupportedSchemaVersion)
     {
@@ -172,16 +92,15 @@ void ReadConnection(
     const toml::table& server,
     std::vector<ConfigurationOverride>& output)
 {
-    const toml::table* connection =
-        OptionalTable(server, "connection", "server.connection");
+    const auto* connection =
+        core::OptionalTable(server, "connection");
     if (connection == nullptr)
     {
         return;
     }
 
-    RejectUnknownKeys(
+    core::RejectUnknownKeys(
         *connection,
-        "server.connection",
         {
             "receive_chunk_bytes",
             "send_queue_items",
@@ -193,37 +112,31 @@ void ReadConnection(
     AddInteger(
         *connection,
         "receive_chunk_bytes",
-        "server.connection.receive_chunk_bytes",
         "receive-chunk-bytes",
         output);
     AddInteger(
         *connection,
         "send_queue_items",
-        "server.connection.send_queue_items",
         "send-queue-items",
         output);
     AddInteger(
         *connection,
         "send_queue_bytes",
-        "server.connection.send_queue_bytes",
         "send-queue-bytes",
         output);
     AddInteger(
         *connection,
         "send_gather_segments",
-        "server.connection.send_gather_segments",
         "send-gather-segments",
         output);
     AddInteger(
         *connection,
         "send_gather_bytes",
-        "server.connection.send_gather_bytes",
         "send-gather-bytes",
         output);
     AddInteger(
         *connection,
         "outbound_batch_segments",
-        "server.connection.outbound_batch_segments",
         "outbound-batch-segments",
         output);
 }
@@ -232,16 +145,15 @@ void ReadServer(
     const toml::table& root,
     std::vector<ConfigurationOverride>& output)
 {
-    const toml::table* server =
-        OptionalTable(root, "server", "server");
+    const auto* server =
+        core::OptionalTable(root, "server");
     if (server == nullptr)
     {
         return;
     }
 
-    RejectUnknownKeys(
+    core::RejectUnknownKeys(
         *server,
-        "server",
         {
             "address",
             "port",
@@ -250,24 +162,13 @@ void ReadServer(
             "shutdown_timeout_ms",
             "connection",
         });
-    AddString(*server, "address", "server.address", "address", output);
-    AddInteger(*server, "port", "server.port", "port", output);
-    AddInteger(
-        *server,
-        "backlog",
-        "server.backlog",
-        "backlog",
-        output);
-    AddInteger(
-        *server,
-        "io_workers",
-        "server.io_workers",
-        "io-workers",
-        output);
+    AddString(*server, "address", "address", output);
+    AddInteger(*server, "port", "port", output);
+    AddInteger(*server, "backlog", "backlog", output);
+    AddInteger(*server, "io_workers", "io-workers", output);
     AddInteger(
         *server,
         "shutdown_timeout_ms",
-        "server.shutdown_timeout_ms",
         "shutdown-timeout-ms",
         output);
     ReadConnection(*server, output);
@@ -277,16 +178,15 @@ void ReadLogging(
     const toml::table& root,
     std::vector<ConfigurationOverride>& output)
 {
-    const toml::table* logging =
-        OptionalTable(root, "logging", "logging");
+    const auto* logging =
+        core::OptionalTable(root, "logging");
     if (logging == nullptr)
     {
         return;
     }
 
-    RejectUnknownKeys(
+    core::RejectUnknownKeys(
         *logging,
-        "logging",
         {
             "console",
             "file",
@@ -307,7 +207,7 @@ void ReadLogging(
         "logging.file",
         "file-log",
         output);
-    AddString(*logging, "path", "logging.path", "log-file", output);
+    AddString(*logging, "path", "log-file", output);
     AddBoolean(
         *logging,
         "append",
@@ -317,13 +217,11 @@ void ReadLogging(
     AddString(
         *logging,
         "console_level",
-        "logging.console_level",
         "console-log-level",
         output);
     AddString(
         *logging,
         "file_level",
-        "logging.file_level",
         "file-log-level",
         output);
 }
@@ -360,7 +258,7 @@ std::vector<ConfigurationOverride> LoadTomlConfiguration(
             std::string{parse_error.description()});
     }
 
-    RejectUnknownKeys(root, "", {"schema_version", "server", "logging"});
+    core::RejectUnknownKeys(root, {"schema_version", "server", "logging"});
     ReadSchemaVersion(root);
 
     std::vector<ConfigurationOverride> output;
