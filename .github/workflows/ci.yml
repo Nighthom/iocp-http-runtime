@@ -19,7 +19,7 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Install Ninja
-        run: choco install ninja -y --no-progress
+        run: pip install ninja
 
       - name: Configure
         run: cmake --preset ${{ matrix.preset }}
