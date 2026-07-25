@@ -4,6 +4,7 @@
 #pragma once
 
 #include "buffer/ring_receive_buffer.h"
+#include "core/timer_service.h"
 #include "execution/executor.h"
 #include "protocol/http/http_request_parser.h"
 #include "protocol/http/http_router.h"
@@ -20,6 +21,8 @@ struct HttpSessionOptions final
     std::size_t initial_buffer_bytes{4096};
     std::size_t maximum_buffer_bytes{2 * 1024 * 1024};
     std::size_t maximum_requests_per_connection{100};
+    std::chrono::milliseconds parser_timeout{
+        std::chrono::seconds{0}}; // 0 = disabled
     HttpParserOptions parser;
 };
 
@@ -47,6 +50,10 @@ public:
     std::size_t RequestsDispatched() const noexcept;
     std::uint64_t ConnectionId() const noexcept;
 
+    void SetTimerService(std::shared_ptr<core::TimerService> timer);
+
+    bool ParseTimedOut() const noexcept { return parser_timed_out_; }
+
 private:
     ProtocolFeedStatus PostErrorResponse(
         std::uint16_t status_code,
@@ -67,6 +74,11 @@ private:
     bool stopped_{};
     HttpParseError last_parse_error_{HttpParseError::None};
     std::size_t requests_dispatched_{};
+    bool parser_timed_out_{};
+    std::shared_ptr<core::TimerService> timer_service_;
+    core::TimerId parser_timer_id_{0};
+    std::chrono::milliseconds parser_timeout_{
+        std::chrono::seconds{0}};
 };
 
 } // namespace iocp::protocol::http

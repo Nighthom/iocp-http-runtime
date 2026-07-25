@@ -37,7 +37,8 @@ HttpSession::HttpSession(
       parser_(options.parser),
       maximum_requests_per_connection_(
           options.maximum_requests_per_connection),
-      connection_id_(connection_id)
+      connection_id_(connection_id),
+      parser_timeout_(options.parser_timeout)
 {
     if (!router_)
     {
@@ -64,8 +65,20 @@ HttpSession::HttpSession(
 ProtocolFeedResult HttpSession::Feed(
     const buffer::ByteView bytes)
 {
+    if (parser_timed_out_)
+    {
+        stopped_ = true;
+        return ProtocolFeedResult{
+            ProtocolFeedStatus::Stopped,
+            0,
+            receive_buffer_.ReadableBytes(),
+        };
+    }
+
     if (stopped_)
     {
+        if (timer_service_ && parser_timer_id_ != 0)
+            timer_service_->Cancel(parser_timer_id_);
         return ProtocolFeedResult{
             ProtocolFeedStatus::Stopped,
             0,
@@ -109,6 +122,15 @@ ProtocolFeedResult HttpSession::Feed(
 
         if (parsed.status == HttpParseStatus::Incomplete)
         {
+            if (timer_service_ &&
+                parser_timeout_ > std::chrono::milliseconds::zero() &&
+                !parser_timed_out_)
+            {
+                parser_timer_id_ = timer_service_->Reschedule(
+                    parser_timer_id_,
+                    parser_timeout_,
+                    [this] { parser_timed_out_ = true; });
+            }
             return ProtocolFeedResult{
                 ProtocolFeedStatus::Ready,
                 dispatched_now,
@@ -118,6 +140,8 @@ ProtocolFeedResult HttpSession::Feed(
 
         if (parsed.status == HttpParseStatus::Error)
         {
+            if (timer_service_ && parser_timer_id_ != 0)
+                timer_service_->Cancel(parser_timer_id_);
             stopped_ = true;
             last_parse_error_ = parsed.error;
             const ProtocolFeedStatus status = PostErrorResponse(
@@ -192,6 +216,12 @@ std::size_t HttpSession::RequestsDispatched() const noexcept
 std::uint64_t HttpSession::ConnectionId() const noexcept
 {
     return connection_id_;
+}
+
+void HttpSession::SetTimerService(
+    std::shared_ptr<core::TimerService> timer)
+{
+    timer_service_ = std::move(timer);
 }
 
 ProtocolFeedStatus HttpSession::PostErrorResponse(
