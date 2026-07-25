@@ -139,6 +139,7 @@ std::vector<std::byte> FrameCodec::EncodeSettings(
     FrameHeader header;
     header.type = FrameType::Settings;
     header.stream_id = 0;
+    header.length = static_cast<std::uint32_t>(payload.size());
 
     auto frame = EncodeHeader(header);
     frame.reserve(kHeaderSize + payload.size());
