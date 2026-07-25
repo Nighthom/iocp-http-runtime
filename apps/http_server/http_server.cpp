@@ -296,7 +296,7 @@ void HttpServer::OnAccepted(
                                     router,
                                     serial_executor,
                                     [connection_slot](
-                                        std::uint32_t /*stream_id*/,
+                                        std::uint32_t stream_id,
                                         protocol::http::HttpResponse
                                             response) mutable {
                                         const auto conn =
@@ -312,7 +312,7 @@ void HttpServer::OnAccepted(
 
                                         FrameHeader fh;
                                         fh.type = FrameType::Headers;
-                                        fh.stream_id = 1;
+                                        fh.stream_id = stream_id;
                                         fh.flags = static_cast<std::uint8_t>(FrameFlags::EndHeaders);
                                         if (response.body.empty()) fh.flags |= static_cast<std::uint8_t>(FrameFlags::EndStream);
                                         fh.length = static_cast<std::uint32_t>(hb.size());
@@ -324,7 +324,7 @@ void HttpServer::OnAccepted(
                                         {
                                             FrameHeader df;
                                             df.type = FrameType::Data;
-                                            df.stream_id = 1;
+                                            df.stream_id = stream_id;
                                             df.flags = static_cast<std::uint8_t>(FrameFlags::EndStream);
                                             df.length = static_cast<std::uint32_t>(response.body.size());
                                             auto dframe = FrameCodec::EncodeHeader(df);
