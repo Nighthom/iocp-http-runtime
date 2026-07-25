@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(iocp_http_runtime LANGUAGES CXX)
+project(iocp_http_runtime LANGUAGES CXX C)
 
 include(CTest)
 include(FetchContent)
@@ -31,6 +31,26 @@ FetchContent_Declare(
     GIT_TAG 30172438cee64926dc41fdd9c11fb3ba5b2ba9de # v3.4.0
 )
 FetchContent_MakeAvailable(tomlplusplus)
+
+FetchContent_Declare(
+    sqlite3
+    URL https://www.sqlite.org/2025/sqlite-amalgamation-3480000.zip
+)
+FetchContent_MakeAvailable(sqlite3)
+
+add_library(sqlite3_lib STATIC
+    ${sqlite3_SOURCE_DIR}/sqlite3.c
+)
+target_include_directories(sqlite3_lib PUBLIC ${sqlite3_SOURCE_DIR})
+target_compile_definitions(sqlite3_lib PRIVATE
+    SQLITE_THREADSAFE=1
+    SQLITE_OMIT_LOAD_EXTENSION=1
+)
+if(MSVC)
+    target_compile_options(sqlite3_lib PRIVATE /w)
+else()
+    target_compile_options(sqlite3_lib PRIVATE -w)
+endif()
 
 function(iocp_enable_project_warnings target)
     if(MSVC)
@@ -88,7 +108,7 @@ add_library(iocp_server_core
 
 target_compile_features(iocp_server_core PUBLIC cxx_std_17)
 target_include_directories(iocp_server_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(iocp_server_core PUBLIC Threads::Threads ws2_32 tomlplusplus::tomlplusplus)
+target_link_libraries(iocp_server_core PUBLIC Threads::Threads ws2_32 tomlplusplus::tomlplusplus sqlite3_lib)
 
 add_library(iocp_echo_application
     apps/echo_server/configuration.cpp
@@ -136,6 +156,8 @@ add_library(iocp_webapp
     apps/webapp/webapp.cpp
     apps/webapp/board_handlers.cpp
     apps/webapp/configuration.cpp
+    apps/webapp/db.cpp
+    apps/webapp/multipart.cpp
 )
 target_link_libraries(
     iocp_webapp

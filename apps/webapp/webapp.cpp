@@ -3,8 +3,12 @@
 
 #include "webapp/webapp.h"
 #include "webapp/board_handlers.h"
+#include "webapp/multipart.h"
 
 #include "core/json_utils.h"
+
+#include <filesystem>
+#include <fstream>
 
 #include "execution/serial_executor.h"
 
@@ -59,6 +63,7 @@ WebAppServer::WebAppServer(
           std::make_shared<protocol::http::HttpRouter>())
     , timer_service_(
           std::make_shared<core::TimerService>())
+    , db_(std::make_unique<Database>("webapp.db"))
 {
     webapp::SetHomeDirectory(options_.home_directory);
 }
@@ -168,8 +173,7 @@ void WebAppServer::RegisterRoutes()
             const auto session = ExtractSessionId(request);
             if (!session.empty())
             {
-                std::lock_guard lock(auth_->mutex);
-                auth_->sessions.erase(session);
+                db_->DeleteSession(session);
             }
             return Redirect("/login");
         });
@@ -356,6 +360,39 @@ void WebAppServer::RegisterRoutes()
             return resp;
         });
 
+    // POST /api/upload — file upload
+    router.Register(
+        HttpMethod::Post, "/api/upload",
+        [this](const HttpRequest& req) {
+            using namespace protocol::http;
+            const auto ct = req.Header("content-type").value_or("");
+            const auto bpos = ct.find("boundary=");
+            if (bpos == std::string_view::npos)
+                return MakeTextResponse(400, "{\"error\":\"no boundary\"}",
+                    "application/json; charset=utf-8");
+            auto boundary = std::string(ct.substr(bpos + 9));
+            if (boundary.size() >= 2 && boundary.front() == '"')
+                boundary = boundary.substr(1, boundary.size() - 2);
+            try {
+                MultipartParser parser(boundary);
+                parser.Feed(StringFromBytes(req.body));
+                if (parser.Files().empty())
+                    return MakeTextResponse(400, "{\"error\":\"no file\"}",
+                        "application/json; charset=utf-8");
+                const auto& f = parser.Files()[0];
+                std::filesystem::create_directories("uploads");
+                std::ofstream out("uploads/" + f.filename, std::ios::binary);
+                out.write(reinterpret_cast<const char*>(f.data.data()),
+                    static_cast<std::streamsize>(f.data.size()));
+                return MakeTextResponse(200,
+                    "{\"ok\":true,\"file\":\"uploads/" + f.filename + "\"}",
+                    "application/json; charset=utf-8");
+            } catch (...) {
+                return MakeTextResponse(500, "{\"error\":\"upload error\"}",
+                    "application/json; charset=utf-8");
+            }
+        });
+
     // GET /
     router.Register(
         HttpMethod::Get, "/",
@@ -481,48 +518,51 @@ std::string WebAppServer::GenerateSessionToken() const
 bool WebAppServer::ValidateSession(
     const std::string& token) const
 {
-    std::lock_guard lock(auth_->mutex);
-    return auth_->sessions.find(token) != auth_->sessions.end();
+    return !db_->LoadSession(token).empty();
 }
 
 std::string WebAppServer::GetUsername(
     const std::string& token) const
 {
-    std::lock_guard lock(auth_->mutex);
-    const auto found = auth_->sessions.find(token);
-    return found != auth_->sessions.end() ? found->second : "";
+    return db_->LoadSession(token);
 }
 
 void WebAppServer::AddSession(
     const std::string& token,
     const std::string& username)
 {
-    std::lock_guard lock(auth_->mutex);
-    auth_->sessions[token] = username;
+    db_->SaveSession(token, username);
 
     // 1시간 후 session 자동 만료
-    auto auth_copy = auth_;
+    auto db_ptr = db_.get();
     (void)timer_service_->Schedule(
         std::chrono::hours{1},
-        [auth_copy, token_copy = token] {
-            std::lock_guard lock(auth_copy->mutex);
-            auth_copy->sessions.erase(token_copy);
+        [db_ptr, token_copy = token] {
+            db_ptr->DeleteSession(token_copy);
         });
 }
 
 std::vector<webapp::Post> WebAppServer::GetPosts() const
 {
-    std::lock_guard lock(board_mutex_);
-    auto posts = posts_;
-    std::reverse(posts.begin(), posts.end());
-    if (posts.size() > 50) posts.resize(50);
-    return posts;
+    // DB에서 읽어서 webapp::Post로 변환
+    auto db_posts = db_->GetPosts(50);
+    std::vector<webapp::Post> result;
+    result.reserve(db_posts.size());
+    for (const auto& p : db_posts)
+    {
+        webapp::Post wp;
+        wp.id = p.id;
+        wp.title = p.title;
+        wp.author = p.author;
+        wp.content = p.content;
+        result.push_back(std::move(wp));
+    }
+    return result;
 }
 
 void WebAppServer::AddPost(webapp::Post post)
 {
-    std::lock_guard lock(board_mutex_);
-    posts_.push_back(std::move(post));
+    (void)db_->InsertPost(post.title, post.author, post.content);
 }
 
 } // namespace iocp::server
