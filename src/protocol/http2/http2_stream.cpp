@@ -518,9 +518,9 @@ ProtocolFeedStatus H2Session::HandleHeaders(
                     if (qpos != std::string::npos)
                     {
                         request.path =
-                            header.value.substr(0, qpos);
+                            hdr.value.substr(0, qpos);
                         request.query =
-                            header.value.substr(qpos + 1);
+                            hdr.value.substr(qpos + 1);
                     }
                     else
                     {
