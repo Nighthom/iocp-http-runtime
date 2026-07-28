@@ -51,11 +51,6 @@ bool FrameCodec::DecodeHeader(
         input.At(1),
         input.At(2));
 
-    if (length > kMaxFrameSize)
-    {
-        return false;
-    }
-
     header.length = length;
     header.type = static_cast<FrameType>(
         static_cast<unsigned char>(input.At(3)));

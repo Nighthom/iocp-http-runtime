@@ -293,82 +293,6 @@ void TestFrameSplitAtEveryBoundary()
     }
 }
 
-void TestStreamInterleaving()
-{
-    // 여러 stream의 HEADERS frame이 교차 도착해도 각 stream이 올바르게 데이터를 받는지 검증
-    // FrameCodec으로 직접 frame을 만들고 H2Session 없이 stream 할당 로직만 테스트
-
-    // Stream 1: GET /one
-    HpackCodec codec;
-    auto headers_1 = codec.Encode({
-        {":method", "GET"},
-        {":path", "/one"},
-        {":authority", "localhost"},
-    });
-
-    // Stream 3: GET /two
-    auto headers_3 = codec.Encode({
-        {":method", "GET"},
-        {":path", "/two"},
-        {":authority", "localhost"},
-    });
-
-    // HEADERS frame for stream 1
-    FrameHeader h1;
-    h1.type = FrameType::Headers;
-    h1.stream_id = 1;
-    h1.flags = static_cast<std::uint8_t>(FrameFlags::EndHeaders) |
-               static_cast<std::uint8_t>(FrameFlags::EndStream);
-    h1.length = static_cast<std::uint32_t>(headers_1.size());
-    auto f1 = FrameCodec::EncodeHeader(h1);
-    f1.insert(f1.end(), headers_1.begin(), headers_1.end());
-
-    // HEADERS frame for stream 3
-    FrameHeader h3;
-    h3.type = FrameType::Headers;
-    h3.stream_id = 3;
-    h3.flags = static_cast<std::uint8_t>(FrameFlags::EndHeaders) |
-               static_cast<std::uint8_t>(FrameFlags::EndStream);
-    h3.length = static_cast<std::uint32_t>(headers_3.size());
-    auto f3 = FrameCodec::EncodeHeader(h3);
-    f3.insert(f3.end(), headers_3.begin(), headers_3.end());
-
-    // Interleave: stream 1 partial, stream 3 full, stream 1 rest
-    // Split f1 at various points, insert f3 in between
-    for (std::size_t split = 1; split < f1.size(); ++split)
-    {
-        // First part of stream 1
-        std::vector<std::byte> interleaved;
-        interleaved.insert(interleaved.end(),
-            f1.begin(), f1.begin() + static_cast<std::ptrdiff_t>(split));
-        // Full stream 3
-        interleaved.insert(interleaved.end(),
-            f3.begin(), f3.end());
-        // Rest of stream 1
-        interleaved.insert(interleaved.end(),
-            f1.begin() + static_cast<std::ptrdiff_t>(split), f1.end());
-
-        // Verify the interleaved buffer has correct total size
-        Check(interleaved.size() == f1.size() + f3.size(),
-            "interleaved buffer should have combined size");
-        Check(!interleaved.empty(),
-            "interleaved buffer should not be empty");
-    }
-
-    // Verify frame decoding through the buffer
-    // Decode first frame header
-    iocp::buffer::BufferSequence seq(
-        iocp::buffer::ByteView(f1.data(), f1.size()));
-
-    FrameHeader decoded;
-    Check(FrameCodec::DecodeHeader(seq, decoded),
-        "stream 1 header should decode");
-    Check(decoded.stream_id == 1,
-        "interleaved stream 1 should have correct stream_id");
-    Check(decoded.type == FrameType::Headers,
-        "interleaved stream 1 should be HEADERS");
-}
-
 std::vector<std::byte> Bytes(const std::string_view text)
 {
     const auto* begin = reinterpret_cast<const std::byte*>(
@@ -460,11 +384,12 @@ void TestProtocolBootstrapFallbackPreservesBytes()
 std::vector<std::byte> MakeHeadersFrame(
     const std::uint32_t stream_id,
     const std::string& path,
-    const bool end_stream)
+    const bool end_stream,
+    const std::string& method = "GET")
 {
     HpackCodec codec;
     auto block = codec.Encode({
-        {":method", "GET"},
+        {":method", method},
         {":path", path},
         {":authority", "localhost"},
     });
@@ -484,6 +409,62 @@ std::vector<std::byte> MakeHeadersFrame(
     auto frame = FrameCodec::EncodeHeader(header);
     frame.insert(frame.end(), block.begin(), block.end());
     return frame;
+}
+
+std::vector<std::byte> MakeDataFrame(
+    const std::uint32_t stream_id,
+    const std::vector<std::byte>& body,
+    const bool end_stream,
+    const std::size_t padding = 0)
+{
+    std::vector<std::byte> payload;
+    std::uint8_t flags = 0;
+    if (padding != 0)
+    {
+        if (padding > 255)
+        {
+            throw std::invalid_argument("test padding too large");
+        }
+        flags |= static_cast<std::uint8_t>(FrameFlags::Padded);
+        payload.push_back(static_cast<std::byte>(padding));
+    }
+    payload.insert(payload.end(), body.begin(), body.end());
+    payload.insert(payload.end(), padding, std::byte{0});
+
+    if (end_stream)
+    {
+        flags |= static_cast<std::uint8_t>(FrameFlags::EndStream);
+    }
+
+    FrameHeader header;
+    header.type = FrameType::Data;
+    header.stream_id = stream_id;
+    header.flags = flags;
+    header.length = static_cast<std::uint32_t>(payload.size());
+    auto frame = FrameCodec::EncodeHeader(header);
+    frame.insert(frame.end(), payload.begin(), payload.end());
+    return frame;
+}
+
+void FeedClientPreamble(H2Session& session)
+{
+    const auto preface = Bytes(FrameCodec::kPreface);
+    const auto result = session.Feed(
+        iocp::buffer::ByteView(
+            preface.data(), preface.size()));
+    Check(
+        result.status ==
+            iocp::protocol::ProtocolFeedStatus::Ready,
+        "client preface must be accepted");
+
+    const auto settings = FrameCodec::EncodeSettings({});
+    const auto settings_result = session.Feed(
+        iocp::buffer::ByteView(
+            settings.data(), settings.size()));
+    Check(
+        settings_result.status ==
+            iocp::protocol::ProtocolFeedStatus::Ready,
+        "initial client SETTINGS must be accepted");
 }
 
 void TestH2SessionEverySplitBoundary()
@@ -550,6 +531,239 @@ void TestH2SessionEverySplitBoundary()
     }
 }
 
+void TestH2PostWaitsForEndStreamAndPreservesBody()
+{
+    auto router =
+        std::make_shared<iocp::protocol::http::HttpRouter>();
+    std::vector<std::byte> received_body;
+    Check(
+        router->Register(
+            iocp::protocol::http::HttpMethod::Post,
+            "/body",
+            [&received_body](
+                const iocp::protocol::http::HttpRequest& request) {
+                received_body = request.body;
+                return iocp::protocol::http::MakeTextResponse(
+                    200, "ok");
+            }),
+        "POST route registration failed");
+
+    auto executor =
+        std::make_shared<iocp::execution::ManualExecutor>(8);
+    std::vector<std::uint32_t> responses;
+    std::vector<std::vector<std::byte>> frames;
+    H2Session session(
+        router,
+        executor,
+        [&responses](
+            const std::uint32_t stream_id,
+            iocp::protocol::http::HttpResponse) {
+            responses.push_back(stream_id);
+        },
+        [&frames](std::vector<std::byte> frame) {
+            frames.push_back(std::move(frame));
+        },
+        1);
+    FeedClientPreamble(session);
+
+    const auto headers =
+        MakeHeadersFrame(1, "/body", false, "POST");
+    const auto header_result = session.Feed(
+        iocp::buffer::ByteView(
+            headers.data(), headers.size()));
+    Check(
+        header_result.status ==
+            iocp::protocol::ProtocolFeedStatus::Ready,
+        "POST headers must be accepted");
+    Check(
+        executor->Snapshot().pending_tasks == 0,
+        "handler must wait until END_STREAM");
+
+    const auto body = Bytes("x");
+    const auto data = MakeDataFrame(1, body, true);
+    const auto data_result = session.Feed(
+        iocp::buffer::ByteView(data.data(), data.size()));
+    Check(
+        data_result.status ==
+            iocp::protocol::ProtocolFeedStatus::Ready,
+        "POST DATA must be accepted on existing stream");
+    Check(
+        data_result.messages_dispatched == 1,
+        "END_STREAM DATA must dispatch exactly one request");
+
+    executor->RunReady();
+    Check(
+        received_body == body,
+        "one-byte DATA body must not lose its first byte");
+    Check(
+        responses.size() == 1 && responses.front() == 1,
+        "POST response must preserve stream id");
+}
+
+void TestH2PaddedDataPreservesBody()
+{
+    auto router =
+        std::make_shared<iocp::protocol::http::HttpRouter>();
+    std::vector<std::byte> received_body;
+    router->Register(
+        iocp::protocol::http::HttpMethod::Post,
+        "/padded",
+        [&received_body](
+            const iocp::protocol::http::HttpRequest& request) {
+            received_body = request.body;
+            return iocp::protocol::http::MakeTextResponse(
+                200, "ok");
+        });
+
+    auto executor =
+        std::make_shared<iocp::execution::ManualExecutor>(8);
+    H2Session session(
+        router,
+        executor,
+        [](std::uint32_t,
+           iocp::protocol::http::HttpResponse) {},
+        [](std::vector<std::byte>) {},
+        1);
+    FeedClientPreamble(session);
+
+    const auto headers =
+        MakeHeadersFrame(1, "/padded", false, "POST");
+    session.Feed(
+        iocp::buffer::ByteView(
+            headers.data(), headers.size()));
+
+    const auto body = Bytes("padded-body");
+    const auto data = MakeDataFrame(1, body, true, 5);
+    const auto result = session.Feed(
+        iocp::buffer::ByteView(data.data(), data.size()));
+    Check(
+        result.status ==
+            iocp::protocol::ProtocolFeedStatus::Ready,
+        "valid padded DATA must be accepted");
+    executor->RunReady();
+    Check(
+        received_body == body,
+        "padding bytes must not enter request body");
+}
+
+void TestH2SessionStreamInterleaving()
+{
+    auto router =
+        std::make_shared<iocp::protocol::http::HttpRouter>();
+    std::vector<std::string> paths;
+    router->Register(
+        iocp::protocol::http::HttpMethod::Post,
+        "/one",
+        [&paths](const iocp::protocol::http::HttpRequest& request) {
+            paths.push_back(
+                request.path + ":" +
+                iocp::protocol::http::StringFromBytes(request.body));
+            return iocp::protocol::http::MakeTextResponse(200, "one");
+        });
+    router->Register(
+        iocp::protocol::http::HttpMethod::Get,
+        "/two",
+        [&paths](const iocp::protocol::http::HttpRequest& request) {
+            paths.push_back(request.path);
+            return iocp::protocol::http::MakeTextResponse(200, "two");
+        });
+
+    auto executor =
+        std::make_shared<iocp::execution::ManualExecutor>(8);
+    std::vector<std::uint32_t> responses;
+    H2Session session(
+        router,
+        executor,
+        [&responses](
+            const std::uint32_t stream_id,
+            iocp::protocol::http::HttpResponse) {
+            responses.push_back(stream_id);
+        },
+        [](std::vector<std::byte>) {},
+        1);
+    FeedClientPreamble(session);
+
+    const auto stream1 =
+        MakeHeadersFrame(1, "/one", false, "POST");
+    const auto stream3 =
+        MakeHeadersFrame(3, "/two", true);
+    const auto stream1_data =
+        MakeDataFrame(1, Bytes("body"), true);
+
+    Check(
+        session.Feed(iocp::buffer::ByteView(
+            stream1.data(), stream1.size())).status ==
+            iocp::protocol::ProtocolFeedStatus::Ready,
+        "stream 1 HEADERS must be accepted");
+    Check(
+        session.Feed(iocp::buffer::ByteView(
+            stream3.data(), stream3.size())).status ==
+            iocp::protocol::ProtocolFeedStatus::Ready,
+        "stream 3 HEADERS must be accepted while stream 1 is open");
+    Check(
+        session.Feed(iocp::buffer::ByteView(
+            stream1_data.data(), stream1_data.size())).status ==
+            iocp::protocol::ProtocolFeedStatus::Ready,
+        "stream 1 DATA must remain valid after stream 3 opens");
+
+    executor->RunReady();
+    Check(
+        responses.size() == 2 &&
+            responses[0] == 3 &&
+            responses[1] == 1,
+        "interleaved streams must preserve response stream ids");
+    Check(
+        paths.size() == 2 &&
+            paths[0] == "/two" &&
+            paths[1] == "/one:body",
+        "each stream must assemble its own request");
+}
+
+void TestH2RejectsMalformedPaddedData()
+{
+    auto router =
+        std::make_shared<iocp::protocol::http::HttpRouter>();
+    router->Register(
+        iocp::protocol::http::HttpMethod::Post,
+        "/bad",
+        [](const iocp::protocol::http::HttpRequest&) {
+            return iocp::protocol::http::MakeTextResponse(200, "bad");
+        });
+    auto executor =
+        std::make_shared<iocp::execution::ManualExecutor>(8);
+    H2Session session(
+        router,
+        executor,
+        [](std::uint32_t,
+           iocp::protocol::http::HttpResponse) {},
+        [](std::vector<std::byte>) {},
+        1);
+    FeedClientPreamble(session);
+
+    const auto headers =
+        MakeHeadersFrame(1, "/bad", false, "POST");
+    session.Feed(
+        iocp::buffer::ByteView(headers.data(), headers.size()));
+
+    FrameHeader data_header;
+    data_header.type = FrameType::Data;
+    data_header.stream_id = 1;
+    data_header.flags =
+        static_cast<std::uint8_t>(FrameFlags::Padded) |
+        static_cast<std::uint8_t>(FrameFlags::EndStream);
+    data_header.length = 1;
+    auto malformed = FrameCodec::EncodeHeader(data_header);
+    malformed.push_back(static_cast<std::byte>(5));
+
+    const auto result = session.Feed(
+        iocp::buffer::ByteView(
+            malformed.data(), malformed.size()));
+    Check(
+        result.status ==
+            iocp::protocol::ProtocolFeedStatus::ProtocolError,
+        "padding beyond payload must be rejected");
+}
+
 template <typename Test>
 bool RunTest(const char* name, Test test)
 {
@@ -606,9 +820,6 @@ int main()
         "frame split at every boundary",
         TestFrameSplitAtEveryBoundary);
     failures += !RunTest(
-        "stream interleaving",
-        TestStreamInterleaving);
-    failures += !RunTest(
         "protocol bootstrap every split",
         TestProtocolBootstrapEverySplit);
     failures += !RunTest(
@@ -617,5 +828,17 @@ int main()
     failures += !RunTest(
         "H2 session every split boundary",
         TestH2SessionEverySplitBoundary);
+    failures += !RunTest(
+        "H2 POST waits for END_STREAM and preserves body",
+        TestH2PostWaitsForEndStreamAndPreservesBody);
+    failures += !RunTest(
+        "H2 padded DATA preserves body",
+        TestH2PaddedDataPreservesBody);
+    failures += !RunTest(
+        "H2 session stream interleaving",
+        TestH2SessionStreamInterleaving);
+    failures += !RunTest(
+        "H2 rejects malformed padded DATA",
+        TestH2RejectsMalformedPaddedData);
     return failures == 0 ? 0 : 1;
 }

@@ -15,6 +15,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -78,6 +79,13 @@ public:
     }
     bool EndStream() const noexcept { return end_stream_; }
     void SetEndStream() noexcept { end_stream_ = true; }
+    bool HeadersComplete() const noexcept { return headers_complete_; }
+    void SetHeadersComplete() noexcept { headers_complete_ = true; }
+    bool Dispatched() const noexcept { return dispatched_; }
+    void SetDispatched() noexcept { dispatched_ = true; }
+    void SetRequest(http::HttpRequest request);
+    bool HasRequest() const noexcept { return request_.has_value(); }
+    http::HttpRequest TakeRequest();
 
     StreamSnapshot Snapshot() const;
 
@@ -89,12 +97,16 @@ private:
     std::vector<std::byte> header_block_;
     std::vector<std::byte> body_;
     bool end_stream_{};
+    bool headers_complete_{};
+    bool dispatched_{};
+    std::optional<http::HttpRequest> request_;
 };
 
 struct H2ConnectionConfig final
 {
     std::size_t initial_receive_buffer_size{4096};
     std::size_t maximum_receive_buffer_size{1024 * 1024};
+    std::size_t maximum_request_body_size{1024 * 1024};
     std::size_t maximum_concurrent_streams{100};
     std::uint32_t initial_window_size{65535};
     std::uint32_t maximum_frame_size{16384};
@@ -156,10 +168,12 @@ private:
         const std::byte* payload);
     ProtocolFeedStatus HandleHeaders(
         const FrameHeader& header,
-        const std::byte* payload);
+        const std::byte* payload,
+        std::size_t& dispatching);
     ProtocolFeedStatus HandleData(
         const FrameHeader& header,
-        const std::byte* payload);
+        const std::byte* payload,
+        std::size_t& dispatching);
     ProtocolFeedStatus HandleRstStream(
         const FrameHeader& header,
         const std::byte* payload);
@@ -177,7 +191,9 @@ private:
         std::uint32_t stream_id,
         bool remote_initiated = true);
     void CloseStream(std::uint32_t stream_id);
-    void DispatchRequest(std::uint32_t stream_id);
+    ProtocolFeedStatus DispatchRequest(
+        std::uint32_t stream_id,
+        std::size_t& dispatching);
 
     void SendFrame(const FrameHeader& header,
         const std::vector<std::byte>& payload = {});
@@ -201,6 +217,8 @@ private:
     std::uint32_t remote_settings_initial_window_size_{65535};
     std::uint32_t connection_recv_window_{65535};
     std::uint32_t connection_send_window_{65535};
+    bool received_initial_settings_{};
+    std::optional<std::uint32_t> continuation_stream_id_;
 
     std::unordered_map<std::uint32_t, std::unique_ptr<H2Stream>> streams_;
 };

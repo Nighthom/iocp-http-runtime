@@ -242,6 +242,7 @@ void HttpServer::OnAccepted(
             [protocol_state,
              router = router_,
              serial_executor,
+             application_executor = application_executor_,
              connection_slot,
              encoder,
              session_options = options_.session,
@@ -329,13 +330,13 @@ void HttpServer::OnAccepted(
                     {
                         auto make_h2 =
                             [router,
-                             serial_executor,
+                             application_executor,
                              connection_slot,
                              connection_id]() {
                                 return std::make_shared<
                                     protocol::http2::H2Session>(
                                     router,
-                                    serial_executor,
+                                    application_executor,
                                     [connection_slot](
                                         const std::uint32_t stream_id,
                                         protocol::http::HttpResponse
