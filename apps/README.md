@@ -19,6 +19,7 @@
 - listener / connector
 - `ConnectionRegistry`
 - protocol session (`HttpSession` / `H2Session`)
+- h2c prior-knowledge protocol bootstrap
 - `HttpRouter` + route handler
 - configuration (TOML → CLI → defaults)
 
