@@ -338,86 +338,6 @@ void HttpServer::OnAccepted(
                                     router,
                                     application_executor,
                                     [connection_slot](
-                                        const std::uint32_t stream_id,
-                                        protocol::http::HttpResponse
-                                            response) mutable {
-                                        const auto conn =
-                                            connection_slot->lock();
-                                        if (!conn) return;
-
-                                        using namespace protocol::http2;
-                                        HpackCodec hpack;
-                                        std::vector<
-                                            protocol::http::HttpHeader>
-                                            headers;
-                                        headers.push_back({
-                                            ":status",
-                                            std::to_string(
-                                                response.status_code)});
-                                        for (auto& header :
-                                             response.headers)
-                                        {
-                                            headers.push_back(
-                                                std::move(header));
-                                        }
-                                        auto header_block =
-                                            hpack.Encode(headers);
-
-                                        FrameHeader headers_frame;
-                                        headers_frame.type =
-                                            FrameType::Headers;
-                                        headers_frame.stream_id =
-                                            stream_id;
-                                        headers_frame.flags =
-                                            static_cast<std::uint8_t>(
-                                                FrameFlags::EndHeaders);
-                                        if (response.body.empty())
-                                        {
-                                            headers_frame.flags |=
-                                                static_cast<std::uint8_t>(
-                                                    FrameFlags::EndStream);
-                                        }
-                                        headers_frame.length =
-                                            static_cast<std::uint32_t>(
-                                                header_block.size());
-                                        auto encoded_headers =
-                                            FrameCodec::EncodeHeader(
-                                                headers_frame);
-                                        encoded_headers.insert(
-                                            encoded_headers.end(),
-                                            header_block.begin(),
-                                            header_block.end());
-
-                                        transport::TcpConnection::
-                                            OutboundBatch batch;
-                                        batch.push_back(
-                                            std::move(encoded_headers));
-                                        if (!response.body.empty())
-                                        {
-                                            FrameHeader data_frame;
-                                            data_frame.type =
-                                                FrameType::Data;
-                                            data_frame.stream_id =
-                                                stream_id;
-                                            data_frame.flags =
-                                                static_cast<std::uint8_t>(
-                                                    FrameFlags::EndStream);
-                                            data_frame.length =
-                                                static_cast<std::uint32_t>(
-                                                    response.body.size());
-                                            auto encoded_data =
-                                                FrameCodec::EncodeHeader(
-                                                    data_frame);
-                                            encoded_data.insert(
-                                                encoded_data.end(),
-                                                response.body.begin(),
-                                                response.body.end());
-                                            batch.push_back(
-                                                std::move(encoded_data));
-                                        }
-                                        conn->SendBatch(std::move(batch));
-                                    },
-                                    [connection_slot](
                                         std::vector<std::byte>
                                             frame_data) {
                                         const auto conn =
@@ -427,8 +347,20 @@ void HttpServer::OnAccepted(
                                             OutboundBatch batch;
                                         batch.push_back(
                                             std::move(frame_data));
-                                        conn->SendBatch(
-                                            std::move(batch));
+                                        const auto status =
+                                            conn->SendBatch(
+                                                std::move(batch));
+                                        if (status ==
+                                                transport::SendStatus::
+                                                    StartFailed ||
+                                            status ==
+                                                transport::SendStatus::
+                                                    QueueOverflow)
+                                        {
+                                            conn->BeginClose(
+                                                transport::CloseReason::
+                                                    SendError);
+                                        }
                                     },
                                     connection_id);
                             };

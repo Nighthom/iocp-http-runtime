@@ -7,6 +7,7 @@
 #include "protocol/http/http_router.h"
 #include "protocol/http2/http2_frames.h"
 #include "protocol/http2/http2_hpack.h"
+#include "protocol/http2/http2_outbound.h"
 #include "protocol/protocol_session.h"
 #include "buffer/ring_receive_buffer.h"
 
@@ -135,16 +136,12 @@ enum class H2FeedStatus
 class H2Session final : public IProtocolSession
 {
 public:
-    using ResponseSender = std::function<void(
-        std::uint32_t stream_id,
-        http::HttpResponse response)>;
     using FrameSender = std::function<void(
         std::vector<std::byte> frame_data)>;
 
     H2Session(
         std::shared_ptr<http::HttpRouter> router,
         std::shared_ptr<execution::IExecutor> executor,
-        ResponseSender response_sender,
         FrameSender frame_sender,
         std::uint64_t connection_id,
         H2ConnectionConfig config = {});
@@ -201,22 +198,21 @@ private:
 
     std::shared_ptr<http::HttpRouter> router_;
     std::shared_ptr<execution::IExecutor> executor_;
-    ResponseSender response_sender_;
     FrameSender frame_sender_;
+    std::shared_ptr<H2OutboundScheduler> outbound_;
     std::uint64_t connection_id_;
     H2ConnectionConfig config_;
 
     mutable std::mutex mutex_;
     buffer::RingReceiveBuffer receive_buffer_;
     HpackCodec hpack_decoder_;
-    HpackCodec hpack_encoder_;
     H2ConnectionState state_{H2ConnectionState::ExpectPreface};
     std::uint32_t last_stream_id_{};
     std::uint32_t remote_settings_header_table_size_{4096};
     std::uint32_t remote_settings_max_concurrent_streams_{100};
     std::uint32_t remote_settings_initial_window_size_{65535};
+    std::uint32_t remote_settings_maximum_frame_size_{16384};
     std::uint32_t connection_recv_window_{65535};
-    std::uint32_t connection_send_window_{65535};
     bool received_initial_settings_{};
     std::optional<std::uint32_t> continuation_stream_id_;
 

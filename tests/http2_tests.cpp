@@ -467,6 +467,202 @@ void FeedClientPreamble(H2Session& session)
         "initial client SETTINGS must be accepted");
 }
 
+std::vector<std::uint32_t> ResponseHeaderStreamIds(
+    const std::vector<std::vector<std::byte>>& frames)
+{
+    std::vector<std::uint32_t> stream_ids;
+    for (const auto& frame : frames)
+    {
+        if (frame.size() < FrameCodec::kHeaderSize)
+        {
+            continue;
+        }
+        FrameHeader header;
+        if (FrameCodec::DecodeHeader(
+                iocp::buffer::BufferSequence(
+                    iocp::buffer::ByteView(
+                        frame.data(), frame.size())),
+                header) &&
+            header.type == FrameType::Headers)
+        {
+            stream_ids.push_back(header.stream_id);
+        }
+    }
+    return stream_ids;
+}
+
+std::vector<FrameHeader> DecodeFrameHeaders(
+    const std::vector<std::vector<std::byte>>& frames)
+{
+    std::vector<FrameHeader> headers;
+    for (const auto& frame : frames)
+    {
+        FrameHeader header;
+        Check(
+            FrameCodec::DecodeHeader(
+                iocp::buffer::BufferSequence(
+                    iocp::buffer::ByteView(
+                        frame.data(), frame.size())),
+                header),
+            "captured outbound frame header must decode");
+        headers.push_back(header);
+    }
+    return headers;
+}
+
+void TestH2OutboundSplitsByMaximumFrameSize()
+{
+    std::vector<std::vector<std::byte>> frames;
+    H2OutboundScheduler scheduler(
+        [&frames](std::vector<std::byte> frame) {
+            frames.push_back(std::move(frame));
+        },
+        65535,
+        16384,
+        {});
+    scheduler.OpenStream(1);
+
+    iocp::protocol::http::HttpResponse response;
+    response.status_code = 200;
+    response.body.resize(20000, static_cast<std::byte>('x'));
+    Check(
+        scheduler.SubmitResponse(1, std::move(response)),
+        "outbound response must be admitted");
+
+    const auto headers = DecodeFrameHeaders(frames);
+    std::vector<FrameHeader> data;
+    for (const auto& header : headers)
+    {
+        if (header.type == FrameType::Data)
+        {
+            data.push_back(header);
+        }
+    }
+    Check(
+        data.size() == 2 &&
+            data[0].length == 16384 &&
+            data[1].length == 3616,
+        "response body must be split by peer max frame size");
+    Check(
+        (headers.front().flags &
+         static_cast<std::uint8_t>(FrameFlags::EndStream)) == 0,
+        "HEADERS must not end a response that has DATA");
+    Check(
+        (data[0].flags &
+         static_cast<std::uint8_t>(FrameFlags::EndStream)) == 0 &&
+            (data[1].flags &
+             static_cast<std::uint8_t>(
+                 FrameFlags::EndStream)) != 0,
+        "only final DATA frame may end the stream");
+}
+
+void TestH2OutboundResumesAfterWindowUpdate()
+{
+    std::vector<std::vector<std::byte>> frames;
+    H2OutboundScheduler scheduler(
+        [&frames](std::vector<std::byte> frame) {
+            frames.push_back(std::move(frame));
+        },
+        3,
+        16384,
+        {});
+    scheduler.OpenStream(1);
+
+    iocp::protocol::http::HttpResponse response;
+    response.status_code = 200;
+    response.body = Bytes("hello");
+    Check(
+        scheduler.SubmitResponse(1, std::move(response)),
+        "flow-controlled response must be admitted");
+
+    auto headers = DecodeFrameHeaders(frames);
+    Check(
+        headers.size() == 2 &&
+            headers[0].type == FrameType::Headers &&
+            (headers[0].flags &
+             static_cast<std::uint8_t>(
+                 FrameFlags::EndStream)) == 0 &&
+            headers[1].type == FrameType::Data &&
+            headers[1].length == 3 &&
+            (headers[1].flags &
+             static_cast<std::uint8_t>(
+                 FrameFlags::EndStream)) == 0,
+        "initial stream window must block remaining DATA");
+
+    Check(
+        scheduler.UpdateStreamWindow(1, 2),
+        "stream WINDOW_UPDATE must resume output");
+    headers = DecodeFrameHeaders(frames);
+    Check(
+        headers.size() == 3 &&
+            headers[2].type == FrameType::Data &&
+            headers[2].length == 2 &&
+            (headers[2].flags &
+             static_cast<std::uint8_t>(
+                 FrameFlags::EndStream)) != 0,
+        "resumed DATA must finish the response");
+}
+
+void TestH2OutboundRejectsLateResponseAfterClose()
+{
+    std::vector<std::vector<std::byte>> frames;
+    H2OutboundScheduler scheduler(
+        [&frames](std::vector<std::byte> frame) {
+            frames.push_back(std::move(frame));
+        },
+        65535,
+        16384,
+        {});
+    scheduler.OpenStream(1);
+    scheduler.Close();
+
+    Check(
+        !scheduler.SubmitResponse(
+            1,
+            iocp::protocol::http::MakeTextResponse(200, "late")),
+        "closed scheduler must reject late handler response");
+    Check(
+        frames.empty(),
+        "late response must not emit frames after close");
+}
+
+void TestH2SessionRejectsHandlerCompletionAfterClose()
+{
+    auto router =
+        std::make_shared<iocp::protocol::http::HttpRouter>();
+    router->Register(
+        iocp::protocol::http::HttpMethod::Get,
+        "/late",
+        [](const iocp::protocol::http::HttpRequest&) {
+            return iocp::protocol::http::MakeTextResponse(
+                200, "late");
+        });
+    auto executor =
+        std::make_shared<iocp::execution::ManualExecutor>(8);
+    std::vector<std::vector<std::byte>> frames;
+    H2Session session(
+        router,
+        executor,
+        [&frames](std::vector<std::byte> frame) {
+            frames.push_back(std::move(frame));
+        },
+        1);
+    FeedClientPreamble(session);
+
+    const auto request =
+        MakeHeadersFrame(1, "/late", true);
+    session.Feed(
+        iocp::buffer::ByteView(
+            request.data(), request.size()));
+    const std::size_t control_frame_count = frames.size();
+    session.Close();
+    executor->RunReady();
+
+    Check(
+        frames.size() == control_frame_count,
+        "handler completion after close must not emit response frames");
+}
+
 void TestH2SessionEverySplitBoundary()
 {
     auto input = Bytes(FrameCodec::kPreface);
@@ -491,16 +687,10 @@ void TestH2SessionEverySplitBoundary()
 
         auto executor =
             std::make_shared<iocp::execution::ManualExecutor>(8);
-        std::vector<std::uint32_t> responses;
         std::vector<std::vector<std::byte>> frames;
         auto session = std::make_shared<H2Session>(
             router,
             executor,
-            [&responses](
-                const std::uint32_t stream_id,
-                iocp::protocol::http::HttpResponse) {
-                responses.push_back(stream_id);
-            },
             [&frames](std::vector<std::byte> frame) {
                 frames.push_back(std::move(frame));
             },
@@ -522,8 +712,11 @@ void TestH2SessionEverySplitBoundary()
             "second split feed must complete request");
 
         executor->RunReady();
+        const auto response_streams =
+            ResponseHeaderStreamIds(frames);
         Check(
-            responses.size() == 1 && responses.front() == 1,
+            response_streams.size() == 1 &&
+                response_streams.front() == 1,
             "split input must dispatch stream 1 exactly once");
         Check(
             frames.size() >= 2,
@@ -550,16 +743,10 @@ void TestH2PostWaitsForEndStreamAndPreservesBody()
 
     auto executor =
         std::make_shared<iocp::execution::ManualExecutor>(8);
-    std::vector<std::uint32_t> responses;
     std::vector<std::vector<std::byte>> frames;
     H2Session session(
         router,
         executor,
-        [&responses](
-            const std::uint32_t stream_id,
-            iocp::protocol::http::HttpResponse) {
-            responses.push_back(stream_id);
-        },
         [&frames](std::vector<std::byte> frame) {
             frames.push_back(std::move(frame));
         },
@@ -595,8 +782,11 @@ void TestH2PostWaitsForEndStreamAndPreservesBody()
     Check(
         received_body == body,
         "one-byte DATA body must not lose its first byte");
+    const auto response_streams =
+        ResponseHeaderStreamIds(frames);
     Check(
-        responses.size() == 1 && responses.front() == 1,
+        response_streams.size() == 1 &&
+            response_streams.front() == 1,
         "POST response must preserve stream id");
 }
 
@@ -620,8 +810,6 @@ void TestH2PaddedDataPreservesBody()
     H2Session session(
         router,
         executor,
-        [](std::uint32_t,
-           iocp::protocol::http::HttpResponse) {},
         [](std::vector<std::byte>) {},
         1);
     FeedClientPreamble(session);
@@ -670,16 +858,13 @@ void TestH2SessionStreamInterleaving()
 
     auto executor =
         std::make_shared<iocp::execution::ManualExecutor>(8);
-    std::vector<std::uint32_t> responses;
+    std::vector<std::vector<std::byte>> frames;
     H2Session session(
         router,
         executor,
-        [&responses](
-            const std::uint32_t stream_id,
-            iocp::protocol::http::HttpResponse) {
-            responses.push_back(stream_id);
+        [&frames](std::vector<std::byte> frame) {
+            frames.push_back(std::move(frame));
         },
-        [](std::vector<std::byte>) {},
         1);
     FeedClientPreamble(session);
 
@@ -707,10 +892,12 @@ void TestH2SessionStreamInterleaving()
         "stream 1 DATA must remain valid after stream 3 opens");
 
     executor->RunReady();
+    const auto response_streams =
+        ResponseHeaderStreamIds(frames);
     Check(
-        responses.size() == 2 &&
-            responses[0] == 3 &&
-            responses[1] == 1,
+        response_streams.size() == 2 &&
+            response_streams[0] == 3 &&
+            response_streams[1] == 1,
         "interleaved streams must preserve response stream ids");
     Check(
         paths.size() == 2 &&
@@ -734,8 +921,6 @@ void TestH2RejectsMalformedPaddedData()
     H2Session session(
         router,
         executor,
-        [](std::uint32_t,
-           iocp::protocol::http::HttpResponse) {},
         [](std::vector<std::byte>) {},
         1);
     FeedClientPreamble(session);
@@ -840,5 +1025,17 @@ int main()
     failures += !RunTest(
         "H2 rejects malformed padded DATA",
         TestH2RejectsMalformedPaddedData);
+    failures += !RunTest(
+        "H2 outbound splits by maximum frame size",
+        TestH2OutboundSplitsByMaximumFrameSize);
+    failures += !RunTest(
+        "H2 outbound resumes after WINDOW_UPDATE",
+        TestH2OutboundResumesAfterWindowUpdate);
+    failures += !RunTest(
+        "H2 outbound rejects late response after close",
+        TestH2OutboundRejectsLateResponseAfterClose);
+    failures += !RunTest(
+        "H2 session rejects handler completion after close",
+        TestH2SessionRejectsHandlerCompletionAfterClose);
     return failures == 0 ? 0 : 1;
 }

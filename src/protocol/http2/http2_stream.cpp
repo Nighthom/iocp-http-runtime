@@ -98,23 +98,25 @@ http::HttpRequest H2Stream::TakeRequest()
 H2Session::H2Session(
     std::shared_ptr<http::HttpRouter> router,
     std::shared_ptr<execution::IExecutor> executor,
-    ResponseSender response_sender,
     FrameSender frame_sender,
     const std::uint64_t connection_id,
     H2ConnectionConfig config)
     : router_(std::move(router))
     , executor_(std::move(executor))
-    , response_sender_(std::move(response_sender))
     , frame_sender_(std::move(frame_sender))
+    , outbound_(std::make_shared<H2OutboundScheduler>(
+        frame_sender_,
+        config.initial_window_size,
+        config.maximum_frame_size,
+        HpackOptions{
+            config.header_table_size,
+            config.maximum_header_list_size}))
     , connection_id_(connection_id)
     , config_(config)
     , receive_buffer_(
         config.initial_receive_buffer_size,
         config.maximum_receive_buffer_size)
     , hpack_decoder_(HpackOptions{
-        config.header_table_size,
-        config.maximum_header_list_size})
-    , hpack_encoder_(HpackOptions{
         config.header_table_size,
         config.maximum_header_list_size})
 {
@@ -127,11 +129,6 @@ H2Session::H2Session(
     {
         throw std::invalid_argument(
             "HTTP/2 session requires an executor");
-    }
-    if (!response_sender_)
-    {
-        throw std::invalid_argument(
-            "HTTP/2 session requires a response sender");
     }
     if (!frame_sender_)
     {
@@ -262,6 +259,7 @@ void H2Session::Close()
     std::lock_guard lock(mutex_);
     state_ = H2ConnectionState::Closed;
     streams_.clear();
+    outbound_->Close();
 }
 
 ProtocolFeedStatus H2Session::ConsumePreface(bool& consumed)
@@ -441,7 +439,6 @@ ProtocolFeedStatus H2Session::HandleSettings(
         {
         case 1: // SETTINGS_HEADER_TABLE_SIZE
             remote_settings_header_table_size_ = value;
-            hpack_encoder_.SetDynamicTableSize(value);
             break;
         case 3: // SETTINGS_MAX_CONCURRENT_STREAMS
             remote_settings_max_concurrent_streams_ = value;
@@ -458,12 +455,20 @@ ProtocolFeedStatus H2Session::HandleSettings(
             {
                 return ProtocolFeedStatus::ProtocolError;
             }
-            config_.maximum_frame_size = value;
+            remote_settings_maximum_frame_size_ = value;
             break;
         case 6: // SETTINGS_MAX_HEADER_LIST_SIZE
             config_.maximum_header_list_size = value;
             break;
         }
+    }
+
+    if (!outbound_->ApplyPeerSettings(
+        remote_settings_initial_window_size_,
+        remote_settings_maximum_frame_size_,
+            remote_settings_header_table_size_))
+    {
+        return ProtocolFeedStatus::ProtocolError;
     }
 
     // Send SETTINGS ACK
@@ -879,12 +884,10 @@ ProtocolFeedStatus H2Session::HandleWindowUpdate(
 
     if (header.stream_id == 0)
     {
-        if (connection_send_window_ >
-            0x7fffffffU - increment)
+        if (!outbound_->UpdateConnectionWindow(increment))
         {
             return ProtocolFeedStatus::ProtocolError;
         }
-        connection_send_window_ += increment;
     }
     else
     {
@@ -892,12 +895,11 @@ ProtocolFeedStatus H2Session::HandleWindowUpdate(
             header.stream_id, false);
         if (stream)
         {
-            if (stream->SendWindow() >
-                0x7fffffffU - increment)
+            if (!outbound_->UpdateStreamWindow(
+                    header.stream_id, increment))
             {
                 return ProtocolFeedStatus::ProtocolError;
             }
-            stream->AddSendWindow(increment);
         }
     }
 
@@ -975,6 +977,7 @@ H2Stream* H2Session::GetOrCreateStream(
     }
     auto* ptr = stream.get();
     streams_.emplace(stream_id, std::move(stream));
+    outbound_->OpenStream(stream_id);
     return ptr;
 }
 
@@ -986,6 +989,7 @@ void H2Session::CloseStream(const std::uint32_t stream_id)
         found->second->SetState(StreamState::Closed);
         streams_.erase(found);
     }
+    outbound_->CloseStream(stream_id);
 }
 
 ProtocolFeedStatus H2Session::DispatchRequest(
@@ -1009,13 +1013,14 @@ ProtocolFeedStatus H2Session::DispatchRequest(
     request.body = stream.Body();
     stream.SetDispatched();
 
-    auto response_sender = response_sender_;
+    auto outbound = outbound_;
     const auto dispatch_status = router_->Dispatch(
         std::move(request),
         executor_,
-        [response_sender = std::move(response_sender),
+        [outbound = std::move(outbound),
          stream_id](http::HttpResponse response) mutable {
-            response_sender(stream_id, std::move(response));
+            outbound->SubmitResponse(
+                stream_id, std::move(response));
         },
         false);
 
