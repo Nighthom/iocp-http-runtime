@@ -14,8 +14,12 @@ namespace iocp::protocol::http2
 
 // --- H2Stream implementation ---
 
-H2Stream::H2Stream(const std::uint32_t stream_id)
+H2Stream::H2Stream(
+    const std::uint32_t stream_id,
+    const std::uint32_t initial_window_size)
     : stream_id_(stream_id)
+    , recv_window_(initial_window_size)
+    , send_window_(initial_window_size)
 {
 }
 
@@ -23,6 +27,10 @@ void H2Stream::AppendHeaderFragment(
     const std::byte* data,
     const std::size_t size)
 {
+    if (size == 0)
+    {
+        return;
+    }
     header_block_.insert(
         header_block_.end(), data, data + size);
 }
@@ -31,6 +39,10 @@ void H2Stream::AppendData(
     const std::byte* data,
     const std::size_t size)
 {
+    if (size == 0)
+    {
+        return;
+    }
     body_.insert(body_.end(), data, data + size);
 }
 
@@ -143,6 +155,7 @@ H2Session::H2Session(
         throw std::invalid_argument(
             "HTTP/2 buffer limits are invalid");
     }
+    connection_recv_window_ = config_.initial_window_size;
 }
 
 ProtocolFeedResult H2Session::Feed(
@@ -161,12 +174,7 @@ ProtocolFeedResult H2Session::Feed(
 
     if (receive_buffer_.Append(bytes) != buffer::BufferStatus::Ready)
     {
-        state_ = H2ConnectionState::Closing;
-        return ProtocolFeedResult{
-            ProtocolFeedStatus::BufferLimitExceeded,
-            0,
-            receive_buffer_.ReadableBytes(),
-        };
+        return FailConnection(ErrorCode::EnhanceYourCalm, 0);
     }
 
     std::size_t dispatching = 0;
@@ -180,6 +188,12 @@ ProtocolFeedResult H2Session::Feed(
             status = ConsumePreface(consumed);
             if (status != ProtocolFeedStatus::Ready)
             {
+                if (status == ProtocolFeedStatus::ProtocolError)
+                {
+                    return FailConnection(
+                        ErrorCode::ProtocolError,
+                        dispatching);
+                }
                 return ProtocolFeedResult{
                     status,
                     dispatching,
@@ -202,6 +216,12 @@ ProtocolFeedResult H2Session::Feed(
             status = ConsumeFrame(consumed, dispatching);
             if (status != ProtocolFeedStatus::Ready)
             {
+                if (status == ProtocolFeedStatus::ProtocolError)
+                {
+                    return FailConnection(
+                        ErrorCode::ProtocolError,
+                        dispatching);
+                }
                 return ProtocolFeedResult{
                     status,
                     dispatching,
@@ -384,8 +404,13 @@ ProtocolFeedStatus H2Session::ConsumeFrame(
         status = HandleGoaway(header, payload.data());
         break;
     case FrameType::Priority:
+        if (header.stream_id == 0 || header.length != 5)
+        {
+            status = ProtocolFeedStatus::ProtocolError;
+        }
+        break;
     case FrameType::PushPromise:
-        // Accept but ignore for now
+        status = ProtocolFeedStatus::ProtocolError;
         break;
     }
 
@@ -578,7 +603,10 @@ ProtocolFeedStatus H2Session::HandleHeaders(
     const auto header_size =
         header.length - payload_offset - pad_length;
 
-    stream->AppendHeaderFragment(header_data, header_size);
+    if (header_size != 0)
+    {
+        stream->AppendHeaderFragment(header_data, header_size);
+    }
 
     if (!continuation && end_stream)
     {
@@ -766,8 +794,9 @@ ProtocolFeedStatus H2Session::HandleData(
         CloseStream(header.stream_id);
         return ProtocolFeedStatus::ProtocolError;
     }
-    if (stream->Body().size() >
-        config_.maximum_request_body_size - data_size)
+    if (data_size > config_.maximum_request_body_size ||
+        stream->Body().size() >
+            config_.maximum_request_body_size - data_size)
     {
         CloseStream(header.stream_id);
         return ProtocolFeedStatus::BufferLimitExceeded;
@@ -778,8 +807,11 @@ ProtocolFeedStatus H2Session::HandleData(
     connection_recv_window_ -=
         static_cast<std::uint32_t>(flow_size);
 
-    stream->AppendData(
-        payload + payload_offset, data_size);
+    if (data_size != 0)
+    {
+        stream->AppendData(
+            payload + payload_offset, data_size);
+    }
 
     const auto end_stream =
         (header.flags &
@@ -789,16 +821,11 @@ ProtocolFeedStatus H2Session::HandleData(
     {
         stream->SetEndStream();
         stream->SetState(StreamState::HalfClosedRemote);
-        const auto dispatch_status = DispatchRequest(
-            header.stream_id, dispatching);
-        if (dispatch_status != ProtocolFeedStatus::Ready)
-        {
-            return dispatch_status;
-        }
     }
 
     // Send WINDOW_UPDATE if needed
-    if (connection_recv_window_ < 32768)
+    if (connection_recv_window_ <
+        config_.initial_window_size / 2)
     {
         const auto wu_bytes = FrameCodec::EncodeWindowUpdate(
             config_.initial_window_size -
@@ -817,7 +844,8 @@ ProtocolFeedStatus H2Session::HandleData(
         frame_sender_(std::move(frame));
     }
 
-    if (stream->RecvWindow() < 32768)
+    if (stream->RecvWindow() <
+        config_.initial_window_size / 2)
     {
         const auto increment =
             config_.initial_window_size - stream->RecvWindow();
@@ -831,6 +859,12 @@ ProtocolFeedStatus H2Session::HandleData(
         update.length =
             static_cast<std::uint32_t>(bytes.size());
         SendFrame(update, bytes);
+    }
+
+    if (end_stream)
+    {
+        return DispatchRequest(
+            header.stream_id, dispatching);
     }
 
     return ProtocolFeedStatus::Ready;
@@ -891,12 +925,10 @@ ProtocolFeedStatus H2Session::HandleWindowUpdate(
     }
     else
     {
-        auto* stream = GetOrCreateStream(
-            header.stream_id, false);
-        if (stream)
+        if (!outbound_->UpdateStreamWindow(
+                header.stream_id, increment))
         {
-            if (!outbound_->UpdateStreamWindow(
-                    header.stream_id, increment))
+            if (header.stream_id > last_stream_id_)
             {
                 return ProtocolFeedStatus::ProtocolError;
             }
@@ -970,7 +1002,8 @@ H2Stream* H2Session::GetOrCreateStream(
         return nullptr;
     }
 
-    auto stream = std::make_unique<H2Stream>(stream_id);
+    auto stream = std::make_unique<H2Stream>(
+        stream_id, config_.initial_window_size);
     if (remote_initiated)
     {
         stream->SetState(StreamState::Open);
@@ -1027,6 +1060,7 @@ ProtocolFeedStatus H2Session::DispatchRequest(
     if (dispatch_status == http::HttpDispatchStatus::Accepted)
     {
         ++dispatching;
+        streams_.erase(found);
         return ProtocolFeedStatus::Ready;
     }
 
@@ -1067,6 +1101,28 @@ void H2Session::SendSettings()
 
     auto frame = FrameCodec::EncodeSettings(settings);
     frame_sender_(std::move(frame));
+}
+
+ProtocolFeedResult H2Session::FailConnection(
+    const ErrorCode error_code,
+    const std::size_t dispatching)
+{
+    if (state_ == H2ConnectionState::Connected ||
+        state_ == H2ConnectionState::Closing)
+    {
+        frame_sender_(FrameCodec::EncodeGoaway(
+            last_stream_id_, error_code, ""));
+    }
+    state_ = H2ConnectionState::Closed;
+    receive_buffer_.Clear();
+    streams_.clear();
+    continuation_stream_id_.reset();
+    outbound_->Close();
+    return ProtocolFeedResult{
+        ProtocolFeedStatus::CloseRequired,
+        dispatching,
+        0,
+    };
 }
 
 } // namespace iocp::protocol::http2

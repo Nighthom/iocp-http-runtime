@@ -19,6 +19,7 @@ enum class ProtocolFeedStatus : std::uint8_t
     HandlerNotFound,
     ExecutorStopped,
     ExecutorSaturated,
+    CloseRequired,
     Stopped,
 };
 

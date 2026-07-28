@@ -391,8 +391,66 @@ std::vector<HpackCodec::TableEntry> HpackCodec::BuildStaticTable()
 
 HpackCodec::HpackCodec(const HpackOptions options)
     : static_table_(BuildStaticTable())
+    , current_dynamic_table_limit_(
+        options.maximum_dynamic_table_size)
     , options_(options)
 {
+}
+
+const HpackCodec::TableEntry& HpackCodec::Lookup(
+    const std::uint32_t index) const
+{
+    if (index == 0)
+    {
+        throw std::runtime_error(
+            "HPACK: header table index 0 is invalid");
+    }
+    if (index < static_table_.size())
+    {
+        return static_table_[index];
+    }
+
+    const std::size_t dynamic_index =
+        static_cast<std::size_t>(index) -
+        static_table_.size();
+    if (dynamic_index >= dynamic_table_.size())
+    {
+        throw std::runtime_error(
+            "HPACK: header table index is out of bounds");
+    }
+    return dynamic_table_[dynamic_index];
+}
+
+void HpackCodec::AddDynamicEntry(
+    const std::string& name,
+    const std::string& value)
+{
+    const std::size_t entry_size =
+        name.size() + value.size() + 32;
+    if (entry_size > current_dynamic_table_limit_)
+    {
+        dynamic_table_.clear();
+        dynamic_table_size_ = 0;
+        return;
+    }
+
+    dynamic_table_.insert(
+        dynamic_table_.begin(), {name, value});
+    dynamic_table_size_ += entry_size;
+    EvictDynamicTable();
+}
+
+void HpackCodec::EvictDynamicTable()
+{
+    while (dynamic_table_size_ >
+               current_dynamic_table_limit_ &&
+           !dynamic_table_.empty())
+    {
+        const auto& entry = dynamic_table_.back();
+        dynamic_table_size_ -=
+            entry.name.size() + entry.value.size() + 32;
+        dynamic_table_.pop_back();
+    }
 }
 
 static std::uint32_t ReadDecodedInteger(
@@ -511,13 +569,7 @@ std::vector<http::HttpHeader> HpackCodec::Decode(
                     "HPACK: invalid indexed header index 0");
             }
 
-            const auto& entry = [&]() -> const TableEntry& {
-                if (index <= static_table_.size())
-                {
-                    return static_table_[index];
-                }
-                return dynamic_table_[index - static_table_.size() - 1];
-            }();
+            const auto& entry = Lookup(index);
 
             headers.push_back({entry.name, entry.value});
             header_list_size +=
@@ -531,14 +583,7 @@ std::vector<http::HttpHeader> HpackCodec::Decode(
 
             if (name_index > 0)
             {
-                const auto& entry = [&]() -> const TableEntry& {
-                    if (name_index <= static_table_.size())
-                    {
-                        return static_table_[name_index];
-                    }
-                    return dynamic_table_[
-                        name_index - static_table_.size() - 1];
-                }();
+                const auto& entry = Lookup(name_index);
                 header.name = entry.name;
             }
             else
@@ -551,11 +596,7 @@ std::vector<http::HttpHeader> HpackCodec::Decode(
             header_list_size +=
                 header.name.size() + header.value.size() + 32;
 
-            dynamic_table_.insert(
-                dynamic_table_.begin(),
-                {header.name, header.value});
-            dynamic_table_size_ +=
-                header.name.size() + header.value.size() + 32;
+            AddDynamicEntry(header.name, header.value);
         }
         else if ((first_byte & 0xf0) == 0x00)
         {
@@ -565,14 +606,7 @@ std::vector<http::HttpHeader> HpackCodec::Decode(
 
             if (name_index > 0)
             {
-                const auto& entry = [&]() -> const TableEntry& {
-                    if (name_index <= static_table_.size())
-                    {
-                        return static_table_[name_index];
-                    }
-                    return dynamic_table_[
-                        name_index - static_table_.size() - 1];
-                }();
+                const auto& entry = Lookup(name_index);
                 header.name = entry.name;
             }
             else
@@ -612,6 +646,17 @@ std::vector<std::byte> HpackCodec::Encode(
 {
     std::vector<std::byte> result;
 
+    if (pending_table_size_update_)
+    {
+        result.push_back(static_cast<std::byte>(0x20));
+        EncodeInteger(
+            result,
+            static_cast<std::uint32_t>(
+                *pending_table_size_update_),
+            5);
+        pending_table_size_update_.reset();
+    }
+
     for (const auto& header : headers)
     {
         int static_index = -1;
@@ -625,10 +670,32 @@ std::vector<std::byte> HpackCodec::Encode(
             }
         }
 
-        if (static_index > 0)
+        std::uint32_t dynamic_index = 0;
+        if (static_index < 0)
+        {
+            for (std::size_t index = 0;
+                 index < dynamic_table_.size();
+                 ++index)
+            {
+                if (dynamic_table_[index].name == header.name &&
+                    dynamic_table_[index].value == header.value)
+                {
+                    dynamic_index = static_cast<std::uint32_t>(
+                        static_table_.size() + index);
+                    break;
+                }
+            }
+        }
+
+        if (static_index > 0 || dynamic_index != 0)
         {
             result.push_back(static_cast<std::byte>(0x80));
-            EncodeInteger(result, static_index, 7);
+            EncodeInteger(
+                result,
+                static_index > 0
+                    ? static_cast<std::uint32_t>(static_index)
+                    : dynamic_index,
+                7);
         }
         else
         {
@@ -641,11 +708,32 @@ std::vector<std::byte> HpackCodec::Encode(
                     break;
                 }
             }
+            std::uint32_t dynamic_name_index = 0;
+            if (name_index < 0)
+            {
+                for (std::size_t index = 0;
+                     index < dynamic_table_.size();
+                     ++index)
+                {
+                    if (dynamic_table_[index].name == header.name)
+                    {
+                        dynamic_name_index =
+                            static_cast<std::uint32_t>(
+                                static_table_.size() + index);
+                        break;
+                    }
+                }
+            }
 
-            if (name_index > 0)
+            if (name_index > 0 || dynamic_name_index != 0)
             {
                 result.push_back(static_cast<std::byte>(0x40));
-                EncodeInteger(result, name_index, 6);
+                EncodeInteger(
+                    result,
+                    name_index > 0
+                        ? static_cast<std::uint32_t>(name_index)
+                        : dynamic_name_index,
+                    6);
             }
             else
             {
@@ -656,11 +744,7 @@ std::vector<std::byte> HpackCodec::Encode(
 
             EncodeString(result, header.value, true);
 
-            dynamic_table_.insert(
-                dynamic_table_.begin(),
-                {header.name, header.value});
-            dynamic_table_size_ +=
-                header.name.size() + header.value.size() + 32;
+            AddDynamicEntry(header.name, header.value);
         }
     }
 
@@ -670,21 +754,14 @@ std::vector<std::byte> HpackCodec::Encode(
 void HpackCodec::SetDynamicTableSize(
     const std::size_t new_size)
 {
-    dynamic_table_size_ = 0;
-
-    while (!dynamic_table_.empty())
+    if (new_size > options_.maximum_dynamic_table_size)
     {
-        const auto& entry = dynamic_table_.back();
-        dynamic_table_size_ -=
-            entry.name.size() + entry.value.size() + 32;
-        dynamic_table_.pop_back();
+        throw std::runtime_error(
+            "HPACK: dynamic table size exceeds configured limit");
     }
-
-    if (new_size == 0)
-    {
-        dynamic_table_.clear();
-        dynamic_table_size_ = 0;
-    }
+    current_dynamic_table_limit_ = new_size;
+    pending_table_size_update_ = new_size;
+    EvictDynamicTable();
 }
 
 void HpackCodec::EncodeInteger(

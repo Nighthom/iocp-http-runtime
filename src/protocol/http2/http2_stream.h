@@ -49,7 +49,9 @@ struct StreamSnapshot final
 class H2Stream final
 {
 public:
-    explicit H2Stream(std::uint32_t stream_id);
+    H2Stream(
+        std::uint32_t stream_id,
+        std::uint32_t initial_window_size);
     ~H2Stream() = default;
 
     H2Stream(const H2Stream&) = delete;
@@ -195,6 +197,9 @@ private:
     void SendFrame(const FrameHeader& header,
         const std::vector<std::byte>& payload = {});
     void SendSettings();
+    ProtocolFeedResult FailConnection(
+        ErrorCode error_code,
+        std::size_t dispatching);
 
     std::shared_ptr<http::HttpRouter> router_;
     std::shared_ptr<execution::IExecutor> executor_;

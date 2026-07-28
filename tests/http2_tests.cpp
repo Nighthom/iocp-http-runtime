@@ -212,6 +212,37 @@ void TestHpackStringLiteral()
         "HPACK string literal round-trip mismatch");
 }
 
+void TestHpackDynamicTableAcrossBlocks()
+{
+    HpackCodec encoder;
+    HpackCodec decoder;
+    const std::vector<iocp::protocol::http::HttpHeader> headers{
+        {"x-dynamic", "reused"},
+    };
+
+    const auto first = encoder.Encode(headers);
+    const auto first_decoded =
+        decoder.Decode(first.data(), first.size());
+    Check(
+        first_decoded.size() == 1 &&
+            first_decoded[0].name == "x-dynamic" &&
+            first_decoded[0].value == "reused",
+        "first dynamic header block must decode");
+
+    const auto second = encoder.Encode(headers);
+    Check(
+        second.size() == 1 &&
+            (static_cast<std::uint8_t>(second[0]) & 0x80) != 0,
+        "second block should use indexed dynamic entry");
+    const auto second_decoded =
+        decoder.Decode(second.data(), second.size());
+    Check(
+        second_decoded.size() == 1 &&
+            second_decoded[0].name == "x-dynamic" &&
+            second_decoded[0].value == "reused",
+        "dynamic index 62 must resolve across header blocks");
+}
+
 void TestFrameSplitBoundary()
 {
     // SETTINGS frame: header(9) + payload(6 per setting) → 15 bytes minimum
@@ -945,8 +976,131 @@ void TestH2RejectsMalformedPaddedData()
             malformed.data(), malformed.size()));
     Check(
         result.status ==
-            iocp::protocol::ProtocolFeedStatus::ProtocolError,
+            iocp::protocol::ProtocolFeedStatus::CloseRequired,
         "padding beyond payload must be rejected");
+}
+
+void TestH2RequiresInitialSettings()
+{
+    auto router =
+        std::make_shared<iocp::protocol::http::HttpRouter>();
+    auto executor =
+        std::make_shared<iocp::execution::ManualExecutor>(4);
+    H2Session session(
+        router,
+        executor,
+        [](std::vector<std::byte>) {},
+        1);
+
+    const auto preface = Bytes(FrameCodec::kPreface);
+    session.Feed(
+        iocp::buffer::ByteView(
+            preface.data(), preface.size()));
+    const auto ping = FrameCodec::EncodePing(1, false);
+    const auto result = session.Feed(
+        iocp::buffer::ByteView(ping.data(), ping.size()));
+    Check(
+        result.status ==
+            iocp::protocol::ProtocolFeedStatus::CloseRequired,
+        "first client frame after preface must be SETTINGS");
+}
+
+void TestH2RejectsMalformedSettingsLength()
+{
+    auto router =
+        std::make_shared<iocp::protocol::http::HttpRouter>();
+    auto executor =
+        std::make_shared<iocp::execution::ManualExecutor>(4);
+    H2Session session(
+        router,
+        executor,
+        [](std::vector<std::byte>) {},
+        1);
+    const auto preface = Bytes(FrameCodec::kPreface);
+    session.Feed(
+        iocp::buffer::ByteView(
+            preface.data(), preface.size()));
+
+    FrameHeader header;
+    header.type = FrameType::Settings;
+    header.length = 1;
+    auto malformed = FrameCodec::EncodeHeader(header);
+    malformed.push_back(std::byte{0});
+    const auto result = session.Feed(
+        iocp::buffer::ByteView(
+            malformed.data(), malformed.size()));
+    Check(
+        result.status ==
+            iocp::protocol::ProtocolFeedStatus::CloseRequired,
+        "SETTINGS payload must be a multiple of six bytes");
+}
+
+void TestH2RejectsHeaderBlockInterleaving()
+{
+    auto router =
+        std::make_shared<iocp::protocol::http::HttpRouter>();
+    auto executor =
+        std::make_shared<iocp::execution::ManualExecutor>(4);
+    H2Session session(
+        router,
+        executor,
+        [](std::vector<std::byte>) {},
+        1);
+    FeedClientPreamble(session);
+
+    auto headers = MakeHeadersFrame(1, "/open", false);
+    headers[4] = std::byte{0};
+    const auto first = session.Feed(
+        iocp::buffer::ByteView(
+            headers.data(), headers.size()));
+    Check(
+        first.status ==
+            iocp::protocol::ProtocolFeedStatus::Ready,
+        "open header block must wait for CONTINUATION");
+
+    const auto ping = FrameCodec::EncodePing(1, false);
+    const auto result = session.Feed(
+        iocp::buffer::ByteView(ping.data(), ping.size()));
+    Check(
+        result.status ==
+            iocp::protocol::ProtocolFeedStatus::CloseRequired,
+        "another frame must not interleave an open header block");
+}
+
+void TestH2ReclaimsCompletedStreams()
+{
+    auto router =
+        std::make_shared<iocp::protocol::http::HttpRouter>();
+    router->Register(
+        iocp::protocol::http::HttpMethod::Get,
+        "/many",
+        [](const iocp::protocol::http::HttpRequest&) {
+            return iocp::protocol::http::MakeTextResponse(200, "ok");
+        });
+    auto executor =
+        std::make_shared<iocp::execution::ManualExecutor>(4);
+    H2Session session(
+        router,
+        executor,
+        [](std::vector<std::byte>) {},
+        1);
+    FeedClientPreamble(session);
+
+    for (std::uint32_t index = 0; index < 150; ++index)
+    {
+        const std::uint32_t stream_id = index * 2 + 1;
+        const auto request =
+            MakeHeadersFrame(stream_id, "/many", true);
+        const auto result = session.Feed(
+            iocp::buffer::ByteView(
+                request.data(), request.size()));
+        Check(
+            result.status ==
+                iocp::protocol::ProtocolFeedStatus::Ready &&
+                result.messages_dispatched == 1,
+            "completed streams must not exhaust concurrent stream limit");
+        executor->RunReady();
+    }
 }
 
 template <typename Test>
@@ -999,6 +1153,9 @@ int main()
         "HPACK string literal",
         TestHpackStringLiteral);
     failures += !RunTest(
+        "HPACK dynamic table across blocks",
+        TestHpackDynamicTableAcrossBlocks);
+    failures += !RunTest(
         "frame split boundary",
         TestFrameSplitBoundary);
     failures += !RunTest(
@@ -1025,6 +1182,18 @@ int main()
     failures += !RunTest(
         "H2 rejects malformed padded DATA",
         TestH2RejectsMalformedPaddedData);
+    failures += !RunTest(
+        "H2 requires initial SETTINGS",
+        TestH2RequiresInitialSettings);
+    failures += !RunTest(
+        "H2 rejects malformed SETTINGS length",
+        TestH2RejectsMalformedSettingsLength);
+    failures += !RunTest(
+        "H2 rejects header block interleaving",
+        TestH2RejectsHeaderBlockInterleaving);
+    failures += !RunTest(
+        "H2 reclaims completed streams",
+        TestH2ReclaimsCompletedStreams);
     failures += !RunTest(
         "H2 outbound splits by maximum frame size",
         TestH2OutboundSplitsByMaximumFrameSize);

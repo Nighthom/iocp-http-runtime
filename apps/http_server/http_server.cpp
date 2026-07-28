@@ -381,7 +381,12 @@ void HttpServer::OnAccepted(
                     result.status ==
                         protocol::ProtocolFeedStatus::ExecutorSaturated ||
                     result.status ==
-                        protocol::ProtocolFeedStatus::HandlerNotFound)
+                        protocol::ProtocolFeedStatus::HandlerNotFound ||
+                    result.status ==
+                        protocol::ProtocolFeedStatus::
+                            CloseRequired ||
+                    result.status ==
+                        protocol::ProtocolFeedStatus::Stopped)
                 {
                     connection->BeginClose(
                         transport::CloseReason::HandlerError);
