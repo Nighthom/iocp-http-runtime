@@ -6,7 +6,9 @@
 #include "protocol/http/http_message.h"
 #include "protocol/http/http_router.h"
 #include "protocol/http2/http2_frames.h"
+#include "protocol/http2/http2_hpack.h"
 #include "protocol/protocol_session.h"
+#include "buffer/ring_receive_buffer.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -91,6 +93,8 @@ private:
 
 struct H2ConnectionConfig final
 {
+    std::size_t initial_receive_buffer_size{4096};
+    std::size_t maximum_receive_buffer_size{1024 * 1024};
     std::size_t maximum_concurrent_streams{100};
     std::uint32_t initial_window_size{65535};
     std::uint32_t maximum_frame_size{16384};
@@ -143,17 +147,10 @@ public:
     void Close();
 
 private:
-    struct FeedContext final
-    {
-        const std::byte* data{};
-        std::size_t size{};
-        std::size_t offset{};
-        std::size_t dispatching{};
-        H2FeedStatus status{H2FeedStatus::Ready};
-    };
-
-    ProtocolFeedStatus ConsumePreface(FeedContext& ctx);
-    ProtocolFeedStatus ConsumeFrame(FeedContext& ctx);
+    ProtocolFeedStatus ConsumePreface(bool& consumed);
+    ProtocolFeedStatus ConsumeFrame(
+        bool& consumed,
+        std::size_t& dispatching);
     ProtocolFeedStatus HandleSettings(
         const FrameHeader& header,
         const std::byte* payload);
@@ -194,6 +191,9 @@ private:
     H2ConnectionConfig config_;
 
     mutable std::mutex mutex_;
+    buffer::RingReceiveBuffer receive_buffer_;
+    HpackCodec hpack_decoder_;
+    HpackCodec hpack_encoder_;
     H2ConnectionState state_{H2ConnectionState::ExpectPreface};
     std::uint32_t last_stream_id_{};
     std::uint32_t remote_settings_header_table_size_{4096};

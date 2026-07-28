@@ -1,17 +1,48 @@
 // HTTP/2 frame, HPACK 코드 테스트
+#include "execution/manual_executor.h"
+#include "protocol/preface_protocol_bootstrap.h"
+#include "protocol/http/http_router.h"
 #include "protocol/http2/http2_frames.h"
 #include "protocol/http2/http2_hpack.h"
+#include "protocol/http2/http2_stream.h"
 
 #include <cstddef>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace
 {
 
 using namespace iocp::protocol::http2;
+
+class RecordingSession final :
+    public iocp::protocol::IProtocolSession
+{
+public:
+    explicit RecordingSession(std::vector<std::byte>& received)
+        : received_(received)
+    {
+    }
+
+    iocp::protocol::ProtocolFeedResult Feed(
+        const iocp::buffer::ByteView bytes) override
+    {
+        received_.insert(
+            received_.end(), bytes.begin(), bytes.end());
+        return {
+            iocp::protocol::ProtocolFeedStatus::Ready,
+            0,
+            0,
+        };
+    }
+
+private:
+    std::vector<std::byte>& received_;
+};
 
 void Check(const bool condition, const char* message)
 {
@@ -338,6 +369,187 @@ void TestStreamInterleaving()
         "interleaved stream 1 should be HEADERS");
 }
 
+std::vector<std::byte> Bytes(const std::string_view text)
+{
+    const auto* begin = reinterpret_cast<const std::byte*>(
+        text.data());
+    return std::vector<std::byte>(begin, begin + text.size());
+}
+
+void TestProtocolBootstrapEverySplit()
+{
+    const std::string preface(FrameCodec::kPreface);
+    const auto tail = Bytes("tail");
+
+    for (std::size_t split = 1; split < preface.size(); ++split)
+    {
+        std::vector<std::byte> matched;
+        std::vector<std::byte> fallback;
+        iocp::protocol::PrefaceProtocolBootstrap bootstrap(
+            preface,
+            [&matched] {
+                return std::make_shared<RecordingSession>(matched);
+            },
+            [&fallback] {
+                return std::make_shared<RecordingSession>(fallback);
+            });
+
+        const auto input = Bytes(preface);
+        const auto first = bootstrap.Feed(
+            iocp::buffer::ByteView(input.data(), split));
+        Check(
+            first.status ==
+                iocp::protocol::ProtocolFeedStatus::Ready,
+            "partial preface must remain ready");
+        Check(
+            first.buffered_bytes == split,
+            "bootstrap must own partial preface");
+        Check(
+            matched.empty() && fallback.empty(),
+            "partial preface must not select a protocol");
+
+        std::vector<std::byte> rest(
+            input.begin() + static_cast<std::ptrdiff_t>(split),
+            input.end());
+        rest.insert(rest.end(), tail.begin(), tail.end());
+        const auto second = bootstrap.Feed(
+            iocp::buffer::ByteView(rest.data(), rest.size()));
+        Check(
+            second.status ==
+                iocp::protocol::ProtocolFeedStatus::Ready,
+            "completed preface must select matching protocol");
+
+        auto expected = input;
+        expected.insert(expected.end(), tail.begin(), tail.end());
+        Check(
+            matched == expected,
+            "matching protocol must receive preface and tail");
+        Check(
+            fallback.empty(),
+            "fallback protocol must not receive matching preface");
+    }
+}
+
+void TestProtocolBootstrapFallbackPreservesBytes()
+{
+    std::vector<std::byte> matched;
+    std::vector<std::byte> fallback;
+    iocp::protocol::PrefaceProtocolBootstrap bootstrap(
+        std::string(FrameCodec::kPreface),
+        [&matched] {
+            return std::make_shared<RecordingSession>(matched);
+        },
+        [&fallback] {
+            return std::make_shared<RecordingSession>(fallback);
+        });
+
+    const auto request = Bytes(
+        "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    bootstrap.Feed(
+        iocp::buffer::ByteView(request.data(), 2));
+    bootstrap.Feed(
+        iocp::buffer::ByteView(
+            request.data() + 2, request.size() - 2));
+
+    Check(matched.empty(),
+        "HTTP/1.1 input must not select matching protocol");
+    Check(fallback == request,
+        "fallback protocol must receive every detection byte");
+}
+
+std::vector<std::byte> MakeHeadersFrame(
+    const std::uint32_t stream_id,
+    const std::string& path,
+    const bool end_stream)
+{
+    HpackCodec codec;
+    auto block = codec.Encode({
+        {":method", "GET"},
+        {":path", path},
+        {":authority", "localhost"},
+    });
+
+    FrameHeader header;
+    header.type = FrameType::Headers;
+    header.stream_id = stream_id;
+    header.flags =
+        static_cast<std::uint8_t>(FrameFlags::EndHeaders);
+    if (end_stream)
+    {
+        header.flags |=
+            static_cast<std::uint8_t>(FrameFlags::EndStream);
+    }
+    header.length = static_cast<std::uint32_t>(block.size());
+
+    auto frame = FrameCodec::EncodeHeader(header);
+    frame.insert(frame.end(), block.begin(), block.end());
+    return frame;
+}
+
+void TestH2SessionEverySplitBoundary()
+{
+    auto input = Bytes(FrameCodec::kPreface);
+    const auto settings = FrameCodec::EncodeSettings({});
+    const auto headers = MakeHeadersFrame(1, "/split", true);
+    input.insert(input.end(), settings.begin(), settings.end());
+    input.insert(input.end(), headers.begin(), headers.end());
+
+    for (std::size_t split = 1; split < input.size(); ++split)
+    {
+        auto router =
+            std::make_shared<iocp::protocol::http::HttpRouter>();
+        Check(
+            router->Register(
+                iocp::protocol::http::HttpMethod::Get,
+                "/split",
+                [](const iocp::protocol::http::HttpRequest&) {
+                    return iocp::protocol::http::MakeTextResponse(
+                        200, "ok");
+                }),
+            "test route registration failed");
+
+        auto executor =
+            std::make_shared<iocp::execution::ManualExecutor>(8);
+        std::vector<std::uint32_t> responses;
+        std::vector<std::vector<std::byte>> frames;
+        auto session = std::make_shared<H2Session>(
+            router,
+            executor,
+            [&responses](
+                const std::uint32_t stream_id,
+                iocp::protocol::http::HttpResponse) {
+                responses.push_back(stream_id);
+            },
+            [&frames](std::vector<std::byte> frame) {
+                frames.push_back(std::move(frame));
+            },
+            1);
+
+        const auto first = session->Feed(
+            iocp::buffer::ByteView(input.data(), split));
+        Check(
+            first.status ==
+                iocp::protocol::ProtocolFeedStatus::Ready,
+            "first split feed must remain ready");
+        const auto second = session->Feed(
+            iocp::buffer::ByteView(
+                input.data() + split,
+                input.size() - split));
+        Check(
+            second.status ==
+                iocp::protocol::ProtocolFeedStatus::Ready,
+            "second split feed must complete request");
+
+        executor->RunReady();
+        Check(
+            responses.size() == 1 && responses.front() == 1,
+            "split input must dispatch stream 1 exactly once");
+        Check(
+            frames.size() >= 2,
+            "session must send server SETTINGS and client SETTINGS ACK");
+    }
+}
+
 template <typename Test>
 bool RunTest(const char* name, Test test)
 {
@@ -396,5 +608,14 @@ int main()
     failures += !RunTest(
         "stream interleaving",
         TestStreamInterleaving);
+    failures += !RunTest(
+        "protocol bootstrap every split",
+        TestProtocolBootstrapEverySplit);
+    failures += !RunTest(
+        "protocol bootstrap fallback preserves bytes",
+        TestProtocolBootstrapFallbackPreservesBytes);
+    failures += !RunTest(
+        "H2 session every split boundary",
+        TestH2SessionEverySplitBoundary);
     return failures == 0 ? 0 : 1;
 }
