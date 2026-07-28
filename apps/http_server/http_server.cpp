@@ -7,6 +7,7 @@
 #include "protocol/http2/http2_frames.h"
 #include "protocol/http2/http2_hpack.h"
 #include "protocol/http2/http2_stream.h"
+#include "protocol/preface_protocol_bootstrap.h"
 
 #include <exception>
 #include <functional>
@@ -227,7 +228,7 @@ void HttpServer::OnAccepted(
             std::make_shared<protocol::http::HttpResponseEncoder>(
                 options_.encoder);
 
-        // h2c 감지: 첫 바이트가 HTTP/2 preface면 HTTP/2 session으로 전환한다.
+        // protocol bootstrap이 판정 전 byte를 보존하고 session을 선택한다.
         auto protocol_state =
             std::make_shared<std::shared_ptr<protocol::IProtocolSession>>();
 
@@ -241,6 +242,7 @@ void HttpServer::OnAccepted(
             [protocol_state,
              router = router_,
              serial_executor,
+             application_executor = application_executor_,
              connection_slot,
              encoder,
              session_options = options_.session,
@@ -250,132 +252,22 @@ void HttpServer::OnAccepted(
                 const buffer::ByteView bytes) mutable {
                 auto& session = *protocol_state;
 
-                // Protocol detection: check for HTTP/2 preface
-                if (!session && enable_h2 &&
-                    bytes.Size() >= 8)
-                {
-                    constexpr std::string_view h2_prefix =
-                        "PRI * HT";
-                    bool is_h2 = true;
-                    for (std::size_t i = 0;
-                         i < (std::min)(h2_prefix.size(),
-                                        bytes.Size());
-                         ++i)
-                    {
-                        if (static_cast<char>(bytes.Data()[i]) !=
-                            h2_prefix[i])
-                        {
-                            is_h2 = false;
-                            break;
-                        }
-                    }
-
-                    if (is_h2 && bytes.Size() >= 24)
-                    {
-                        // Verify full preface
-                        const auto preface =
-                            protocol::http2::FrameCodec::kPreface;
-                        bool full_match = true;
-                        for (std::size_t i = 0;
-                             i < preface.size() && i < bytes.Size();
-                             ++i)
-                        {
-                            if (static_cast<char>(bytes.Data()[i]) !=
-                                preface[i])
-                            {
-                                full_match = false;
-                                break;
-                            }
-                        }
-                        if (full_match)
-                        {
-                            // Create HTTP/2 session
-                            auto h2_session =
-                                std::make_shared<
-                                    protocol::http2::H2Session>(
-                                    router,
-                                    serial_executor,
-                                    [connection_slot](
-                                        std::uint32_t stream_id,
-                                        protocol::http::HttpResponse
-                                            response) mutable {
-                                        const auto conn =
-                                            connection_slot->lock();
-                                        if (!conn) return;
-                                        // H2 response → HEADERS + DATA frames
-                                        using namespace protocol::http2;
-                                        HpackCodec hpack;
-                                        std::vector<protocol::http::HttpHeader> hdrs;
-                                        hdrs.push_back({":status", std::to_string(response.status_code)});
-                                        for (auto& h : response.headers) hdrs.push_back(std::move(h));
-                                        auto hb = hpack.Encode(hdrs);
-
-                                        FrameHeader fh;
-                                        fh.type = FrameType::Headers;
-                                        fh.stream_id = stream_id;
-                                        fh.flags = static_cast<std::uint8_t>(FrameFlags::EndHeaders);
-                                        if (response.body.empty()) fh.flags |= static_cast<std::uint8_t>(FrameFlags::EndStream);
-                                        fh.length = static_cast<std::uint32_t>(hb.size());
-                                        auto frame = FrameCodec::EncodeHeader(fh);
-                                        frame.insert(frame.end(), hb.begin(), hb.end());
-                                        transport::TcpConnection::OutboundBatch batch;
-                                        batch.push_back(std::move(frame));
-                                        if (!response.body.empty())
-                                        {
-                                            FrameHeader df;
-                                            df.type = FrameType::Data;
-                                            df.stream_id = stream_id;
-                                            df.flags = static_cast<std::uint8_t>(FrameFlags::EndStream);
-                                            df.length = static_cast<std::uint32_t>(response.body.size());
-                                            auto dframe = FrameCodec::EncodeHeader(df);
-                                            dframe.insert(dframe.end(), response.body.begin(), response.body.end());
-                                            batch.push_back(std::move(dframe));
-                                        }
-                                        conn->SendBatch(std::move(batch));
-                                    },
-                                    [connection_slot](
-                                        std::vector<std::byte>
-                                            frame_data) {
-                                        const auto conn =
-                                            connection_slot->lock();
-                                        if (!conn) return;
-                                        transport::TcpConnection::
-                                            OutboundBatch batch;
-                                        batch.push_back(
-                                            std::move(frame_data));
-                                        conn->SendBatch(
-                                            std::move(batch));
-                                    },
-                                    connection_id);
-                            session = std::move(h2_session);
-                            const auto preface_sz =
-                                protocol::http2::FrameCodec::kPreface.size();
-                            const auto result =
-                                session->Feed(bytes.SubView(
-                                    preface_sz,
-                                    bytes.Size() - preface_sz));
-                            if (result.status !=
-                                protocol::ProtocolFeedStatus::Ready)
-                            {
-                                connection->BeginClose(
-                                    transport::CloseReason::HandlerError);
-                            }
-                            return;
-                        }
-                    }
-                }
-
-                // Default: HTTP/1.1 session
                 if (!session)
                 {
-                    auto http_session =
-                        std::make_shared<
-                            protocol::http::HttpSession>(
-                            router,
-                            serial_executor,
-                            [connection_slot, encoder](
-                                protocol::http::HttpResponse
-                                    response) {
+                    auto make_http1 =
+                        [router,
+                         serial_executor,
+                         connection_slot,
+                         encoder,
+                         session_options,
+                         connection_id]() {
+                            return std::make_shared<
+                                protocol::http::HttpSession>(
+                                router,
+                                serial_executor,
+                                [connection_slot, encoder](
+                                    protocol::http::HttpResponse
+                                        response) {
                                 const auto connection =
                                     connection_slot->lock();
                                 if (!connection) return;
@@ -425,10 +317,61 @@ void HttpServer::OnAccepted(
                                         transport::CloseReason::
                                             HandlerError);
                                 }
-                            },
-                            connection_id,
-                            session_options);
-                    session = std::move(http_session);
+                                },
+                                connection_id,
+                                session_options);
+                        };
+
+                    if (!enable_h2)
+                    {
+                        session = make_http1();
+                    }
+                    else
+                    {
+                        auto make_h2 =
+                            [router,
+                             application_executor,
+                             connection_slot,
+                             connection_id]() {
+                                return std::make_shared<
+                                    protocol::http2::H2Session>(
+                                    router,
+                                    application_executor,
+                                    [connection_slot](
+                                        std::vector<std::byte>
+                                            frame_data) {
+                                        const auto conn =
+                                            connection_slot->lock();
+                                        if (!conn) return;
+                                        transport::TcpConnection::
+                                            OutboundBatch batch;
+                                        batch.push_back(
+                                            std::move(frame_data));
+                                        const auto status =
+                                            conn->SendBatch(
+                                                std::move(batch));
+                                        if (status ==
+                                                transport::SendStatus::
+                                                    StartFailed ||
+                                            status ==
+                                                transport::SendStatus::
+                                                    QueueOverflow)
+                                        {
+                                            conn->BeginClose(
+                                                transport::CloseReason::
+                                                    SendError);
+                                        }
+                                    },
+                                    connection_id);
+                            };
+
+                        session = std::make_shared<
+                            protocol::PrefaceProtocolBootstrap>(
+                            std::string(
+                                protocol::http2::FrameCodec::kPreface),
+                            std::move(make_h2),
+                            std::move(make_http1));
+                    }
                 }
 
                 const protocol::ProtocolFeedResult result =
@@ -438,7 +381,12 @@ void HttpServer::OnAccepted(
                     result.status ==
                         protocol::ProtocolFeedStatus::ExecutorSaturated ||
                     result.status ==
-                        protocol::ProtocolFeedStatus::HandlerNotFound)
+                        protocol::ProtocolFeedStatus::HandlerNotFound ||
+                    result.status ==
+                        protocol::ProtocolFeedStatus::
+                            CloseRequired ||
+                    result.status ==
+                        protocol::ProtocolFeedStatus::Stopped)
                 {
                     connection->BeginClose(
                         transport::CloseReason::HandlerError);

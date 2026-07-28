@@ -14,8 +14,12 @@ namespace iocp::protocol::http2
 
 // --- H2Stream implementation ---
 
-H2Stream::H2Stream(const std::uint32_t stream_id)
+H2Stream::H2Stream(
+    const std::uint32_t stream_id,
+    const std::uint32_t initial_window_size)
     : stream_id_(stream_id)
+    , recv_window_(initial_window_size)
+    , send_window_(initial_window_size)
 {
 }
 
@@ -23,6 +27,10 @@ void H2Stream::AppendHeaderFragment(
     const std::byte* data,
     const std::size_t size)
 {
+    if (size == 0)
+    {
+        return;
+    }
     header_block_.insert(
         header_block_.end(), data, data + size);
 }
@@ -31,6 +39,10 @@ void H2Stream::AppendData(
     const std::byte* data,
     const std::size_t size)
 {
+    if (size == 0)
+    {
+        return;
+    }
     body_.insert(body_.end(), data, data + size);
 }
 
@@ -76,21 +88,49 @@ StreamSnapshot H2Stream::Snapshot() const
     };
 }
 
+void H2Stream::SetRequest(http::HttpRequest request)
+{
+    request_ = std::move(request);
+}
+
+http::HttpRequest H2Stream::TakeRequest()
+{
+    if (!request_)
+    {
+        throw std::logic_error(
+            "HTTP/2 stream request is not assembled");
+    }
+    http::HttpRequest request = std::move(*request_);
+    request_.reset();
+    return request;
+}
+
 // --- H2Session implementation ---
 
 H2Session::H2Session(
     std::shared_ptr<http::HttpRouter> router,
     std::shared_ptr<execution::IExecutor> executor,
-    ResponseSender response_sender,
     FrameSender frame_sender,
     const std::uint64_t connection_id,
     H2ConnectionConfig config)
     : router_(std::move(router))
     , executor_(std::move(executor))
-    , response_sender_(std::move(response_sender))
     , frame_sender_(std::move(frame_sender))
+    , outbound_(std::make_shared<H2OutboundScheduler>(
+        frame_sender_,
+        config.initial_window_size,
+        config.maximum_frame_size,
+        HpackOptions{
+            config.header_table_size,
+            config.maximum_header_list_size}))
     , connection_id_(connection_id)
     , config_(config)
+    , receive_buffer_(
+        config.initial_receive_buffer_size,
+        config.maximum_receive_buffer_size)
+    , hpack_decoder_(HpackOptions{
+        config.header_table_size,
+        config.maximum_header_list_size})
 {
     if (!router_)
     {
@@ -102,25 +142,25 @@ H2Session::H2Session(
         throw std::invalid_argument(
             "HTTP/2 session requires an executor");
     }
-    if (!response_sender_)
-    {
-        throw std::invalid_argument(
-            "HTTP/2 session requires a response sender");
-    }
     if (!frame_sender_)
     {
         throw std::invalid_argument(
             "HTTP/2 session requires a frame sender");
     }
+    if (config_.initial_receive_buffer_size == 0 ||
+        config_.initial_receive_buffer_size >
+            config_.maximum_receive_buffer_size ||
+        config_.maximum_request_body_size == 0)
+    {
+        throw std::invalid_argument(
+            "HTTP/2 buffer limits are invalid");
+    }
+    connection_recv_window_ = config_.initial_window_size;
 }
 
 ProtocolFeedResult H2Session::Feed(
     const buffer::ByteView bytes)
 {
-    FeedContext ctx;
-    ctx.data = reinterpret_cast<const std::byte*>(bytes.Data());
-    ctx.size = bytes.Size();
-
     std::lock_guard lock(mutex_);
 
     if (state_ == H2ConnectionState::Closed)
@@ -132,33 +172,65 @@ ProtocolFeedResult H2Session::Feed(
         };
     }
 
-    ProtocolFeedStatus status = ProtocolFeedStatus::Ready;
-    while (ctx.offset < ctx.size)
+    if (receive_buffer_.Append(bytes) != buffer::BufferStatus::Ready)
     {
+        return FailConnection(ErrorCode::EnhanceYourCalm, 0);
+    }
+
+    std::size_t dispatching = 0;
+    while (!receive_buffer_.Empty())
+    {
+        bool consumed = false;
+        ProtocolFeedStatus status = ProtocolFeedStatus::Ready;
+
         if (state_ == H2ConnectionState::ExpectPreface)
         {
-            status = ConsumePreface(ctx);
+            status = ConsumePreface(consumed);
             if (status != ProtocolFeedStatus::Ready)
             {
-                return ProtocolFeedResult{status, ctx.dispatching, 0};
+                if (status == ProtocolFeedStatus::ProtocolError)
+                {
+                    return FailConnection(
+                        ErrorCode::ProtocolError,
+                        dispatching);
+                }
+                return ProtocolFeedResult{
+                    status,
+                    dispatching,
+                    receive_buffer_.ReadableBytes(),
+                };
             }
-            if (ctx.offset == 0)
+            if (!consumed)
             {
-                // Not enough data for preface
                 return ProtocolFeedResult{
                     ProtocolFeedStatus::Ready,
-                    ctx.dispatching,
-                    0,
+                    dispatching,
+                    receive_buffer_.ReadableBytes(),
                 };
             }
         }
 
         if (state_ == H2ConnectionState::Connected)
         {
-            status = ConsumeFrame(ctx);
+            consumed = false;
+            status = ConsumeFrame(consumed, dispatching);
             if (status != ProtocolFeedStatus::Ready)
             {
-                return ProtocolFeedResult{status, ctx.dispatching, 0};
+                if (status == ProtocolFeedStatus::ProtocolError)
+                {
+                    return FailConnection(
+                        ErrorCode::ProtocolError,
+                        dispatching);
+                }
+                return ProtocolFeedResult{
+                    status,
+                    dispatching,
+                    receive_buffer_.ReadableBytes(),
+                };
+            }
+            if (!consumed)
+            {
+                break;
             }
         }
 
@@ -168,16 +240,12 @@ ProtocolFeedResult H2Session::Feed(
             break;
         }
 
-        if (ctx.offset == 0)
-        {
-            break;
-        }
     }
 
     return ProtocolFeedResult{
         ProtocolFeedStatus::Ready,
-        ctx.dispatching,
-        0,
+        dispatching,
+        receive_buffer_.ReadableBytes(),
     };
 }
 
@@ -211,36 +279,35 @@ void H2Session::Close()
     std::lock_guard lock(mutex_);
     state_ = H2ConnectionState::Closed;
     streams_.clear();
+    outbound_->Close();
 }
 
-ProtocolFeedStatus H2Session::ConsumePreface(
-    FeedContext& ctx)
+ProtocolFeedStatus H2Session::ConsumePreface(bool& consumed)
 {
+    consumed = false;
     const auto preface = FrameCodec::kPreface;
-    const std::size_t remaining = ctx.size - ctx.offset;
+    const auto readable = receive_buffer_.ReadableSequence();
+    const std::size_t available = readable.Size();
+    const std::size_t compared =
+        (std::min)(available, preface.size());
 
-    if (remaining < preface.size())
+    for (std::size_t index = 0; index < compared; ++index)
     {
-        // Check prefix match
-        if (memcmp(ctx.data + ctx.offset,
-                preface.data(), remaining) != 0)
+        if (static_cast<char>(readable.At(index)) != preface[index])
         {
             state_ = H2ConnectionState::Closing;
             return ProtocolFeedStatus::ProtocolError;
         }
-        ctx.offset = 0;
+    }
+
+    if (available < preface.size())
+    {
         return ProtocolFeedStatus::Ready;
     }
 
-    if (memcmp(ctx.data + ctx.offset,
-            preface.data(), preface.size()) != 0)
-    {
-        state_ = H2ConnectionState::Closing;
-        return ProtocolFeedStatus::ProtocolError;
-    }
-
-    ctx.offset += preface.size();
+    receive_buffer_.Consume(preface.size());
     state_ = H2ConnectionState::Connected;
+    consumed = true;
 
     // Send server preface (SETTINGS)
     SendSettings();
@@ -249,23 +316,20 @@ ProtocolFeedStatus H2Session::ConsumePreface(
 }
 
 ProtocolFeedStatus H2Session::ConsumeFrame(
-    FeedContext& ctx)
+    bool& consumed,
+    std::size_t& dispatching)
 {
-    const auto* data = ctx.data + ctx.offset;
-    const auto remaining = ctx.size - ctx.offset;
+    consumed = false;
+    const auto readable = receive_buffer_.ReadableSequence();
+    const auto remaining = readable.Size();
 
     if (remaining < FrameCodec::kHeaderSize)
     {
-        ctx.offset = 0;
         return ProtocolFeedStatus::Ready;
     }
 
-    buffer::BufferSequence seq(
-        buffer::ByteView(
-            const_cast<std::byte*>(ctx.data),
-            ctx.size));
     FrameHeader header;
-    if (!FrameCodec::DecodeHeader(seq, header))
+    if (!FrameCodec::DecodeHeader(readable, header))
     {
         state_ = H2ConnectionState::Closing;
         return ProtocolFeedStatus::ProtocolError;
@@ -273,37 +337,42 @@ ProtocolFeedStatus H2Session::ConsumeFrame(
 
     const std::size_t frame_total =
         FrameCodec::kHeaderSize + header.length;
+    if (header.length > config_.maximum_frame_size)
+    {
+        state_ = H2ConnectionState::Closing;
+        return ProtocolFeedStatus::ProtocolError;
+    }
     if (remaining < frame_total)
     {
-        ctx.offset = 0;
         return ProtocolFeedStatus::Ready;
     }
 
-    const auto* payload =
-        data + FrameCodec::kHeaderSize;
-
-    // Validate stream_id
-    if (header.stream_id != 0 &&
-        (header.stream_id <= last_stream_id_ ||
-         header.stream_id % 2 != 1))
+    std::vector<std::byte> payload(header.length);
+    if (!payload.empty())
     {
-        // Client-initiated streams must be odd
-        if (header.type == FrameType::Headers ||
-            header.type == FrameType::Data)
-        {
-            const auto rst = FrameCodec::EncodeRstStream(
-                ErrorCode::ProtocolError);
-            FrameHeader rst_header;
-            rst_header.type = FrameType::RstStream;
-            rst_header.stream_id = header.stream_id;
-            rst_header.length =
-                static_cast<std::uint32_t>(rst.size());
-            auto frame = FrameCodec::EncodeHeader(rst_header);
-            frame.insert(frame.end(), rst.begin(), rst.end());
-            frame_sender_(std::move(frame));
-        }
-        ctx.offset += frame_total;
-        return ProtocolFeedStatus::Ready;
+        readable.CopyTo(
+            FrameCodec::kHeaderSize,
+            buffer::MutableByteView(
+                payload.data(), payload.size()));
+    }
+    receive_buffer_.Consume(frame_total);
+    consumed = true;
+
+    if (!received_initial_settings_ &&
+        (header.type != FrameType::Settings ||
+         (header.flags &
+          static_cast<std::uint8_t>(FrameFlags::Ack)) != 0))
+    {
+        state_ = H2ConnectionState::Closing;
+        return ProtocolFeedStatus::ProtocolError;
+    }
+
+    if (continuation_stream_id_ &&
+        (header.type != FrameType::Continuation ||
+         header.stream_id != *continuation_stream_id_))
+    {
+        state_ = H2ConnectionState::Closing;
+        return ProtocolFeedStatus::ProtocolError;
     }
 
     ProtocolFeedStatus status = ProtocolFeedStatus::Ready;
@@ -311,38 +380,38 @@ ProtocolFeedStatus H2Session::ConsumeFrame(
     switch (header.type)
     {
     case FrameType::Settings:
-        status = HandleSettings(header, payload);
+        status = HandleSettings(header, payload.data());
         break;
     case FrameType::Headers:
     case FrameType::Continuation:
-        status = HandleHeaders(header, payload);
+        status = HandleHeaders(
+            header, payload.data(), dispatching);
         break;
     case FrameType::Data:
-        status = HandleData(header, payload);
+        status = HandleData(
+            header, payload.data(), dispatching);
         break;
     case FrameType::RstStream:
-        status = HandleRstStream(header, payload);
+        status = HandleRstStream(header, payload.data());
         break;
     case FrameType::WindowUpdate:
-        status = HandleWindowUpdate(header, payload);
+        status = HandleWindowUpdate(header, payload.data());
         break;
     case FrameType::Ping:
-        status = HandlePing(header, payload);
+        status = HandlePing(header, payload.data());
         break;
     case FrameType::Goaway:
-        status = HandleGoaway(header, payload);
+        status = HandleGoaway(header, payload.data());
         break;
     case FrameType::Priority:
-    case FrameType::PushPromise:
-        // Accept but ignore for now
+        if (header.stream_id == 0 || header.length != 5)
+        {
+            status = ProtocolFeedStatus::ProtocolError;
+        }
         break;
-    }
-
-    ctx.offset += frame_total;
-
-    if (header.stream_id > last_stream_id_)
-    {
-        last_stream_id_ = header.stream_id;
+    case FrameType::PushPromise:
+        status = ProtocolFeedStatus::ProtocolError;
+        break;
     }
 
     return status;
@@ -360,11 +429,20 @@ ProtocolFeedStatus H2Session::HandleSettings(
     if ((header.flags &
          static_cast<std::uint8_t>(FrameFlags::Ack)) != 0)
     {
-        // SETTINGS ACK - nothing to do
+        if (header.length != 0)
+        {
+            return ProtocolFeedStatus::ProtocolError;
+        }
         return ProtocolFeedStatus::Ready;
     }
 
-    // Parse settings
+    if (header.length % 6 != 0)
+    {
+        return ProtocolFeedStatus::ProtocolError;
+    }
+
+    received_initial_settings_ = true;
+
     for (std::size_t i = 0; i + 6 <= header.length; i += 6)
     {
         const std::uint16_t id =
@@ -402,12 +480,20 @@ ProtocolFeedStatus H2Session::HandleSettings(
             {
                 return ProtocolFeedStatus::ProtocolError;
             }
-            config_.maximum_frame_size = value;
+            remote_settings_maximum_frame_size_ = value;
             break;
         case 6: // SETTINGS_MAX_HEADER_LIST_SIZE
             config_.maximum_header_list_size = value;
             break;
         }
+    }
+
+    if (!outbound_->ApplyPeerSettings(
+        remote_settings_initial_window_size_,
+        remote_settings_maximum_frame_size_,
+            remote_settings_header_table_size_))
+    {
+        return ProtocolFeedStatus::ProtocolError;
     }
 
     // Send SETTINGS ACK
@@ -424,7 +510,8 @@ ProtocolFeedStatus H2Session::HandleSettings(
 
 ProtocolFeedStatus H2Session::HandleHeaders(
     const FrameHeader& header,
-    const std::byte* payload)
+    const std::byte* payload,
+    std::size_t& dispatching)
 {
     if (header.stream_id == 0)
     {
@@ -438,10 +525,35 @@ ProtocolFeedStatus H2Session::HandleHeaders(
         (header.flags &
          static_cast<std::uint8_t>(FrameFlags::EndHeaders)) != 0;
 
-    auto* stream = GetOrCreateStream(header.stream_id);
-    if (!stream)
+    const bool continuation =
+        header.type == FrameType::Continuation;
+    H2Stream* stream = nullptr;
+
+    if (continuation)
     {
-        return ProtocolFeedStatus::ProtocolError;
+        const auto found = streams_.find(header.stream_id);
+        if (!continuation_stream_id_ ||
+            *continuation_stream_id_ != header.stream_id ||
+            found == streams_.end())
+        {
+            return ProtocolFeedStatus::ProtocolError;
+        }
+        stream = found->second.get();
+    }
+    else
+    {
+        if (header.stream_id % 2 != 1 ||
+            header.stream_id <= last_stream_id_ ||
+            streams_.find(header.stream_id) != streams_.end())
+        {
+            return ProtocolFeedStatus::ProtocolError;
+        }
+        stream = GetOrCreateStream(header.stream_id);
+        if (!stream)
+        {
+            return ProtocolFeedStatus::ProtocolError;
+        }
+        last_stream_id_ = header.stream_id;
     }
 
     if (stream->State() == StreamState::Closed)
@@ -459,137 +571,172 @@ ProtocolFeedStatus H2Session::HandleHeaders(
         return ProtocolFeedStatus::Ready;
     }
 
-    // Check padding
     std::size_t payload_offset = 0;
     std::uint8_t pad_length = 0;
-    if ((header.flags &
+    if (!continuation &&
+        (header.flags &
          static_cast<std::uint8_t>(FrameFlags::Padded)) != 0)
     {
+        if (header.length == 0)
+        {
+            return ProtocolFeedStatus::ProtocolError;
+        }
         pad_length =
             static_cast<std::uint8_t>(payload[0]);
         payload_offset = 1;
     }
 
-    // Skip priority if present
-    if ((header.flags & 0x20) != 0)
+    if (!continuation &&
+        (header.flags &
+         static_cast<std::uint8_t>(FrameFlags::Priority)) != 0)
     {
         payload_offset += 5;
+    }
+
+    if (payload_offset > header.length ||
+        pad_length > header.length - payload_offset)
+    {
+        return ProtocolFeedStatus::ProtocolError;
     }
 
     const auto* header_data = payload + payload_offset;
     const auto header_size =
         header.length - payload_offset - pad_length;
 
-    stream->AppendHeaderFragment(header_data, header_size);
-
-    if (end_headers)
+    if (header_size != 0)
     {
-        // Decode headers and dispatch request
-        try
+        stream->AppendHeaderFragment(header_data, header_size);
+    }
+
+    if (!continuation && end_stream)
+    {
+        stream->SetEndStream();
+    }
+
+    if (!end_headers)
+    {
+        continuation_stream_id_ = header.stream_id;
+        return ProtocolFeedStatus::Ready;
+    }
+
+    continuation_stream_id_.reset();
+    if (stream->HeadersComplete())
+    {
+        return ProtocolFeedStatus::ProtocolError;
+    }
+
+    try
+    {
+        const auto decoded = hpack_decoder_.Decode(
+            stream->HeaderBlock().data(),
+            stream->HeaderBlock().size());
+
+        http::HttpRequest request;
+        request.connection_id = connection_id_;
+        request.request_id = header.stream_id;
+        bool has_method = false;
+        bool has_path = false;
+        bool saw_regular_header = false;
+
+        for (const auto& hdr : decoded)
         {
-            HpackCodec codec;
-            codec.SetDynamicTableSize(
-                remote_settings_header_table_size_);
-
-            const auto decoded = codec.Decode(
-                stream->HeaderBlock().data(),
-                stream->HeaderBlock().size());
-
-            // Build HttpRequest from decoded pseudo-headers + headers
-            http::HttpRequest request;
-            request.connection_id = connection_id_;
-            bool has_method = false;
-            bool has_path = false;
-
-            for (const auto& hdr : decoded)
+            if (hdr.name.empty())
             {
-                if (hdr.name == ":method")
-                {
-                    request.method =
-                        http::ParseMethod(hdr.value);
-                    request.method_text = hdr.value;
-                    has_method = true;
-                }
-                else if (hdr.name == ":path")
-                {
-                    request.target = hdr.value;
-                    const auto qpos =
-                        hdr.value.find('?');
-                    if (qpos != std::string::npos)
-                    {
-                        request.path =
-                            hdr.value.substr(0, qpos);
-                        request.query =
-                            hdr.value.substr(qpos + 1);
-                    }
-                    else
-                    {
-                        request.path = hdr.value;
-                    }
-                    has_path = true;
-                }
-                else if (hdr.name == ":authority")
-                {
-                    request.headers.push_back(
-                        {"host", hdr.value});
-                }
-                else if (hdr.name == ":scheme")
-                {
-                    request.headers.push_back(
-                        {":scheme", hdr.value});
-                }
-                else if (hdr.name[0] != ':')
-                {
-                    request.headers.push_back(hdr);
-                }
-            }
-
-            if (!has_method || !has_path)
-            {
-                CloseStream(header.stream_id);
                 return ProtocolFeedStatus::ProtocolError;
             }
-
-            if (end_stream)
+            const bool pseudo = hdr.name.front() == ':';
+            if (pseudo && saw_regular_header)
             {
-                stream->SetEndStream();
+                return ProtocolFeedStatus::ProtocolError;
             }
+            saw_regular_header = saw_regular_header || !pseudo;
 
-            // Dispatch to application executor
-            const auto exec_status = router_->Dispatch(
-                std::move(request),
-                executor_,
-                [this, stream_id = header.stream_id](
-                    http::HttpResponse response) {
-                    response_sender_(stream_id,
-                        std::move(response));
-                },
-                !end_stream); // don't close if more data expected
-
-            if (exec_status != http::HttpDispatchStatus::Accepted)
+            if (hdr.name == ":method")
             {
-                CloseStream(header.stream_id);
-                return ProtocolFeedStatus::ExecutorSaturated;
+                if (has_method)
+                {
+                    return ProtocolFeedStatus::ProtocolError;
+                }
+                request.method = http::ParseMethod(hdr.value);
+                request.method_text = hdr.value;
+                has_method = true;
             }
-
-            stream->SetState(end_stream
-                ? StreamState::HalfClosedRemote
-                : StreamState::Open);
+            else if (hdr.name == ":path")
+            {
+                if (has_path)
+                {
+                    return ProtocolFeedStatus::ProtocolError;
+                }
+                request.target = hdr.value;
+                const auto query = hdr.value.find('?');
+                if (query != std::string::npos)
+                {
+                    request.path = hdr.value.substr(0, query);
+                    request.query = hdr.value.substr(query + 1);
+                }
+                else
+                {
+                    request.path = hdr.value;
+                }
+                has_path = true;
+            }
+            else if (hdr.name == ":authority")
+            {
+                request.headers.push_back({"host", hdr.value});
+            }
+            else if (hdr.name == ":scheme")
+            {
+                // scheme은 common request에 아직 별도 field가 없다.
+            }
+            else if (pseudo)
+            {
+                return ProtocolFeedStatus::ProtocolError;
+            }
+            else
+            {
+                for (const char character : hdr.name)
+                {
+                    if (character >= 'A' && character <= 'Z')
+                    {
+                        return ProtocolFeedStatus::ProtocolError;
+                    }
+                }
+                request.headers.push_back(hdr);
+            }
         }
-        catch (const std::exception&)
+
+        if (!has_method || !has_path ||
+            request.method == http::HttpMethod::Unsupported)
         {
-            const auto rst = FrameCodec::EncodeRstStream(
-                ErrorCode::CompressionError);
-            FrameHeader rst_header;
-            rst_header.type = FrameType::RstStream;
-            rst_header.stream_id = header.stream_id;
-            rst_header.length =
-                static_cast<std::uint32_t>(rst.size());
-            auto frame = FrameCodec::EncodeHeader(rst_header);
-            frame.insert(frame.end(), rst.begin(), rst.end());
-            frame_sender_(std::move(frame));
             CloseStream(header.stream_id);
+            return ProtocolFeedStatus::ProtocolError;
         }
+
+        stream->SetRequest(std::move(request));
+        stream->SetHeadersComplete();
+        stream->SetState(stream->EndStream()
+            ? StreamState::HalfClosedRemote
+            : StreamState::Open);
+
+        if (stream->EndStream())
+        {
+            return DispatchRequest(
+                header.stream_id, dispatching);
+        }
+    }
+    catch (const std::exception&)
+    {
+        const auto rst = FrameCodec::EncodeRstStream(
+            ErrorCode::CompressionError);
+        FrameHeader rst_header;
+        rst_header.type = FrameType::RstStream;
+        rst_header.stream_id = header.stream_id;
+        rst_header.length =
+            static_cast<std::uint32_t>(rst.size());
+        auto frame = FrameCodec::EncodeHeader(rst_header);
+        frame.insert(frame.end(), rst.begin(), rst.end());
+        frame_sender_(std::move(frame));
+        CloseStream(header.stream_id);
     }
 
     return ProtocolFeedStatus::Ready;
@@ -597,7 +744,8 @@ ProtocolFeedStatus H2Session::HandleHeaders(
 
 ProtocolFeedStatus H2Session::HandleData(
     const FrameHeader& header,
-    const std::byte* payload)
+    const std::byte* payload,
+    std::size_t& dispatching)
 {
     if (header.stream_id == 0)
     {
@@ -610,36 +758,60 @@ ProtocolFeedStatus H2Session::HandleData(
     {
         return ProtocolFeedStatus::ProtocolError;
     }
+    if (!stream->HeadersComplete() ||
+        stream->EndStream() ||
+        stream->State() == StreamState::Closed)
+    {
+        return ProtocolFeedStatus::ProtocolError;
+    }
 
     std::size_t payload_offset = 0;
+    std::uint8_t pad_length = 0;
     if ((header.flags &
          static_cast<std::uint8_t>(FrameFlags::Padded)) != 0)
     {
-        (void)static_cast<std::uint8_t>(payload[0]);
+        if (header.length == 0)
+        {
+            return ProtocolFeedStatus::ProtocolError;
+        }
+        pad_length = static_cast<std::uint8_t>(payload[0]);
         payload_offset = 1;
     }
 
-    const auto data_size = header.length - payload_offset -
-        ((header.flags &
-          static_cast<std::uint8_t>(FrameFlags::Padded)) != 0
-             ? static_cast<std::uint8_t>(payload[payload_offset])
-             : 0);
+    if (pad_length > header.length - payload_offset)
+    {
+        return ProtocolFeedStatus::ProtocolError;
+    }
+
+    const auto data_size =
+        header.length - payload_offset - pad_length;
+    const auto flow_size = header.length;
 
     // Check flow control
-    if (data_size > stream->RecvWindow() ||
-        data_size > connection_recv_window_)
+    if (flow_size > stream->RecvWindow() ||
+        flow_size > connection_recv_window_)
     {
         CloseStream(header.stream_id);
         return ProtocolFeedStatus::ProtocolError;
     }
+    if (data_size > config_.maximum_request_body_size ||
+        stream->Body().size() >
+            config_.maximum_request_body_size - data_size)
+    {
+        CloseStream(header.stream_id);
+        return ProtocolFeedStatus::BufferLimitExceeded;
+    }
 
     stream->ConsumeRecvWindow(
-        static_cast<std::uint32_t>(data_size));
+        static_cast<std::uint32_t>(flow_size));
     connection_recv_window_ -=
-        static_cast<std::uint32_t>(data_size);
+        static_cast<std::uint32_t>(flow_size);
 
-    stream->AppendData(
-        payload + payload_offset + 1, data_size - 1);
+    if (data_size != 0)
+    {
+        stream->AppendData(
+            payload + payload_offset, data_size);
+    }
 
     const auto end_stream =
         (header.flags &
@@ -652,7 +824,8 @@ ProtocolFeedStatus H2Session::HandleData(
     }
 
     // Send WINDOW_UPDATE if needed
-    if (connection_recv_window_ < 32768)
+    if (connection_recv_window_ <
+        config_.initial_window_size / 2)
     {
         const auto wu_bytes = FrameCodec::EncodeWindowUpdate(
             config_.initial_window_size -
@@ -671,6 +844,29 @@ ProtocolFeedStatus H2Session::HandleData(
         frame_sender_(std::move(frame));
     }
 
+    if (stream->RecvWindow() <
+        config_.initial_window_size / 2)
+    {
+        const auto increment =
+            config_.initial_window_size - stream->RecvWindow();
+        const auto bytes =
+            FrameCodec::EncodeWindowUpdate(increment);
+        stream->AddRecvWindow(increment);
+
+        FrameHeader update;
+        update.type = FrameType::WindowUpdate;
+        update.stream_id = header.stream_id;
+        update.length =
+            static_cast<std::uint32_t>(bytes.size());
+        SendFrame(update, bytes);
+    }
+
+    if (end_stream)
+    {
+        return DispatchRequest(
+            header.stream_id, dispatching);
+    }
+
     return ProtocolFeedStatus::Ready;
 }
 
@@ -678,7 +874,7 @@ ProtocolFeedStatus H2Session::HandleRstStream(
     const FrameHeader& header,
     const std::byte* payload)
 {
-    if (header.length < 4)
+    if (header.stream_id == 0 || header.length != 4)
     {
         return ProtocolFeedStatus::ProtocolError;
     }
@@ -700,7 +896,7 @@ ProtocolFeedStatus H2Session::HandleWindowUpdate(
     const FrameHeader& header,
     const std::byte* payload)
 {
-    if (header.length < 4)
+    if (header.length != 4)
     {
         return ProtocolFeedStatus::ProtocolError;
     }
@@ -722,15 +918,20 @@ ProtocolFeedStatus H2Session::HandleWindowUpdate(
 
     if (header.stream_id == 0)
     {
-        connection_send_window_ += increment;
+        if (!outbound_->UpdateConnectionWindow(increment))
+        {
+            return ProtocolFeedStatus::ProtocolError;
+        }
     }
     else
     {
-        auto* stream = GetOrCreateStream(
-            header.stream_id, false);
-        if (stream)
+        if (!outbound_->UpdateStreamWindow(
+                header.stream_id, increment))
         {
-            stream->AddSendWindow(increment);
+            if (header.stream_id > last_stream_id_)
+            {
+                return ProtocolFeedStatus::ProtocolError;
+            }
         }
     }
 
@@ -768,19 +969,14 @@ ProtocolFeedStatus H2Session::HandleGoaway(
     const FrameHeader& header,
     const std::byte* payload)
 {
+    if (header.stream_id != 0 || header.length < 8)
+    {
+        return ProtocolFeedStatus::ProtocolError;
+    }
     state_ = H2ConnectionState::Closing;
 
-    if (header.length >= 8)
-    {
-        (void)(static_cast<std::uint32_t>(
-                 static_cast<unsigned char>(payload[0]) & 0x7f) << 24);
-        (void)(static_cast<std::uint32_t>(
-                 static_cast<unsigned char>(payload[1])) << 16);
-        (void)(static_cast<std::uint32_t>(
-                 static_cast<unsigned char>(payload[2])) << 8);
-        (void)(static_cast<std::uint32_t>(
-                static_cast<unsigned char>(payload[3])));
-    }
+    (void)(static_cast<std::uint32_t>(
+             static_cast<unsigned char>(payload[0]) & 0x7f) << 24);
 
     return ProtocolFeedStatus::Ready;
 }
@@ -795,19 +991,26 @@ H2Stream* H2Session::GetOrCreateStream(
         return found->second.get();
     }
 
+    if (!remote_initiated)
+    {
+        return nullptr;
+    }
+
     if (streams_.size() >=
         config_.maximum_concurrent_streams)
     {
         return nullptr;
     }
 
-    auto stream = std::make_unique<H2Stream>(stream_id);
+    auto stream = std::make_unique<H2Stream>(
+        stream_id, config_.initial_window_size);
     if (remote_initiated)
     {
         stream->SetState(StreamState::Open);
     }
     auto* ptr = stream.get();
     streams_.emplace(stream_id, std::move(stream));
+    outbound_->OpenStream(stream_id);
     return ptr;
 }
 
@@ -819,6 +1022,52 @@ void H2Session::CloseStream(const std::uint32_t stream_id)
         found->second->SetState(StreamState::Closed);
         streams_.erase(found);
     }
+    outbound_->CloseStream(stream_id);
+}
+
+ProtocolFeedStatus H2Session::DispatchRequest(
+    const std::uint32_t stream_id,
+    std::size_t& dispatching)
+{
+    const auto found = streams_.find(stream_id);
+    if (found == streams_.end())
+    {
+        return ProtocolFeedStatus::ProtocolError;
+    }
+
+    H2Stream& stream = *found->second;
+    if (!stream.HeadersComplete() || !stream.EndStream() ||
+        !stream.HasRequest() || stream.Dispatched())
+    {
+        return ProtocolFeedStatus::ProtocolError;
+    }
+
+    http::HttpRequest request = stream.TakeRequest();
+    request.body = stream.Body();
+    stream.SetDispatched();
+
+    auto outbound = outbound_;
+    const auto dispatch_status = router_->Dispatch(
+        std::move(request),
+        executor_,
+        [outbound = std::move(outbound),
+         stream_id](http::HttpResponse response) mutable {
+            outbound->SubmitResponse(
+                stream_id, std::move(response));
+        },
+        false);
+
+    if (dispatch_status == http::HttpDispatchStatus::Accepted)
+    {
+        ++dispatching;
+        streams_.erase(found);
+        return ProtocolFeedStatus::Ready;
+    }
+
+    CloseStream(stream_id);
+    return dispatch_status == http::HttpDispatchStatus::ExecutorSaturated
+        ? ProtocolFeedStatus::ExecutorSaturated
+        : ProtocolFeedStatus::ExecutorStopped;
 }
 
 void H2Session::SendFrame(
@@ -852,6 +1101,28 @@ void H2Session::SendSettings()
 
     auto frame = FrameCodec::EncodeSettings(settings);
     frame_sender_(std::move(frame));
+}
+
+ProtocolFeedResult H2Session::FailConnection(
+    const ErrorCode error_code,
+    const std::size_t dispatching)
+{
+    if (state_ == H2ConnectionState::Connected ||
+        state_ == H2ConnectionState::Closing)
+    {
+        frame_sender_(FrameCodec::EncodeGoaway(
+            last_stream_id_, error_code, ""));
+    }
+    state_ = H2ConnectionState::Closed;
+    receive_buffer_.Clear();
+    streams_.clear();
+    continuation_stream_id_.reset();
+    outbound_->Close();
+    return ProtocolFeedResult{
+        ProtocolFeedStatus::CloseRequired,
+        dispatching,
+        0,
+    };
 }
 
 } // namespace iocp::protocol::http2

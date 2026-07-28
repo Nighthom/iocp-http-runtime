@@ -12,9 +12,9 @@
 | `execution/` | task submission과 admission (`IExecutor`, `ThreadPoolExecutor`, `SerialExecutor`, `IocpExecutor`) |
 | `buffer/` | borrowed byte view (`ByteView`), `BufferSequence`, bounded receive storage (`ReceiveBuffer`, `RingReceiveBuffer`) |
 | `transport/` | `TcpListener`, `TcpConnector`, `TcpConnection`, `ConnectionRegistry`, `SendQueue` |
-| `protocol/` | protocol-transport 경계 (`IProtocolSession`) |
+| `protocol/` | protocol-transport 경계 (`IProtocolSession`)와 bounded preface bootstrap |
 | `protocol/http/` | HTTP/1.1 parser, router, session, response encoder, `SimpleTemplate` |
-| `protocol/http2/` | HTTP/2 frame codec, HPACK, stream state machine, `H2Session` |
+| `protocol/http2/` | frame codec, connection HPACK, stream state, outbound scheduler, `H2Session` |
 | `protocol/sample/` | length-prefixed protocol (contract proof) |
 
 ## Request Flow
@@ -26,16 +26,19 @@ HTTP/1.1:
     → HttpRouter → handler → HttpResponseEncoder → SendQueue → WSASend
 
 HTTP/2:
-  AcceptEx → TcpListener → TcpConnection → h2c detection
-    → H2Session → FrameCodec → HPACK decode → HttpRouter
-    → handler → response_sender → HEADERS/DATA frames → SendQueue
+  AcceptEx → TcpListener → TcpConnection → PrefaceProtocolBootstrap
+    → H2Session ring → FrameCodec → HPACK decoder → stream request assembly
+    → application pool → HttpRouter → handler
+    → H2OutboundScheduler → HPACK encoder → HEADERS/DATA → SendQueue
 ```
 
 ## Execution Boundaries
 
 - IOCP worker: completion과 transport 상태 전이만 처리
 - Application worker: handler와 service work 실행
-- `SerialExecutor`: connection별 요청/응답 순서 직렬화
+- `SerialExecutor`: HTTP/1.1 connection별 요청/응답 순서 직렬화
+- HTTP/2: stream handler 병렬 실행, connection HPACK/flow state는
+  session과 outbound scheduler에서 직렬화
 - executor saturation: `SubmitStatus`로 호출자에게 전달
 
 ## Configuration Pattern
@@ -62,5 +65,7 @@ HTTP/2:
 | connection state | `protocol/http/http_session.*` |
 | HTTP/2 frames | `protocol/http2/http2_frames.*`, `http2_stream.*` |
 | HPACK | `protocol/http2/http2_hpack.*` |
+| HTTP/2 response/flow control | `protocol/http2/http2_outbound.*` |
+| h2c protocol 선택 | `protocol/preface_protocol_bootstrap.*` |
 | template rendering | `protocol/http/simple_template.*` |
 | config / CLI | `core/config_utils.*` |

@@ -95,7 +95,9 @@ add_library(iocp_server_core
     src/protocol/http/simple_template.cpp
     src/protocol/http2/http2_frames.cpp
     src/protocol/http2/http2_hpack.cpp
+    src/protocol/http2/http2_outbound.cpp
     src/protocol/http2/http2_stream.cpp
+    src/protocol/preface_protocol_bootstrap.cpp
     src/protocol/sample/length_prefixed_codec.cpp
     src/protocol/sample/length_prefixed_session.cpp
     src/protocol/sample/sample_dispatcher.cpp

@@ -1,20 +1,27 @@
 #include "core/logging.h"
 #include "http_server/http_server.h"
 #include "platform/windows/socket_handle.h"
+#include "protocol/http2/http2_frames.h"
+#include "protocol/http2/http2_hpack.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <WinSock2.h>
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace
 {
@@ -47,6 +54,34 @@ void SendAll(const SOCKET socket, const std::string_view bytes)
                 "send(HTTP integration test)");
         }
         Check(sent > 0, "HTTP test send made no progress");
+        offset += static_cast<std::size_t>(sent);
+    }
+}
+
+void SendAll(
+    const SOCKET socket,
+    const std::vector<std::byte>& bytes,
+    const std::size_t fragment_size = static_cast<std::size_t>(-1))
+{
+    std::size_t offset = 0;
+    while (offset < bytes.size())
+    {
+        const std::size_t remaining = bytes.size() - offset;
+        const std::size_t submitted =
+            (std::min)(remaining, fragment_size);
+        const int sent = ::send(
+            socket,
+            reinterpret_cast<const char*>(bytes.data() + offset),
+            static_cast<int>(submitted),
+            0);
+        if (sent == SOCKET_ERROR)
+        {
+            throw std::system_error(
+                ::WSAGetLastError(),
+                std::system_category(),
+                "send(HTTP/2 integration test)");
+        }
+        Check(sent > 0, "HTTP/2 test send made no progress");
         offset += static_cast<std::size_t>(sent);
     }
 }
@@ -180,6 +215,136 @@ private:
     std::string pending_;
 };
 
+struct H2WireFrame final
+{
+    iocp::protocol::http2::FrameHeader header;
+    std::vector<std::byte> payload;
+};
+
+class H2SocketReader final
+{
+public:
+    explicit H2SocketReader(const SOCKET socket)
+        : socket_(socket)
+    {
+    }
+
+    H2WireFrame ReadFrame()
+    {
+        using iocp::protocol::http2::FrameCodec;
+        while (pending_.size() < FrameCodec::kHeaderSize)
+        {
+            ReadMore();
+        }
+
+        iocp::protocol::http2::FrameHeader header;
+        Check(
+            FrameCodec::DecodeHeader(
+                iocp::buffer::BufferSequence(
+                    iocp::buffer::ByteView(
+                        pending_.data(), pending_.size())),
+                header),
+            "HTTP/2 response frame header did not decode");
+
+        const std::size_t frame_size =
+            FrameCodec::kHeaderSize + header.length;
+        while (pending_.size() < frame_size)
+        {
+            ReadMore();
+        }
+
+        H2WireFrame frame;
+        frame.header = header;
+        frame.payload.insert(
+            frame.payload.end(),
+            pending_.begin() +
+                static_cast<std::ptrdiff_t>(FrameCodec::kHeaderSize),
+            pending_.begin() +
+                static_cast<std::ptrdiff_t>(frame_size));
+        pending_.erase(
+            pending_.begin(),
+            pending_.begin() +
+                static_cast<std::ptrdiff_t>(frame_size));
+        return frame;
+    }
+
+private:
+    void ReadMore()
+    {
+        std::byte chunk[4096];
+        const int received = ::recv(
+            socket_,
+            reinterpret_cast<char*>(chunk),
+            sizeof(chunk),
+            0);
+        if (received == SOCKET_ERROR)
+        {
+            throw std::system_error(
+                ::WSAGetLastError(),
+                std::system_category(),
+                "recv(HTTP/2 integration test)");
+        }
+        Check(
+            received > 0,
+            "HTTP/2 peer closed before response completed");
+        pending_.insert(
+            pending_.end(),
+            chunk,
+            chunk + received);
+    }
+
+    SOCKET socket_;
+    std::vector<std::byte> pending_;
+};
+
+std::vector<std::byte> MakeH2Headers(
+    iocp::protocol::http2::HpackCodec& encoder,
+    const std::uint32_t stream_id,
+    const std::string& method,
+    const std::string& path,
+    const bool end_stream)
+{
+    using namespace iocp::protocol::http2;
+    auto block = encoder.Encode({
+        {":method", method},
+        {":scheme", "http"},
+        {":authority", "localhost"},
+        {":path", path},
+    });
+    FrameHeader header;
+    header.type = FrameType::Headers;
+    header.stream_id = stream_id;
+    header.flags =
+        static_cast<std::uint8_t>(FrameFlags::EndHeaders);
+    if (end_stream)
+    {
+        header.flags |=
+            static_cast<std::uint8_t>(FrameFlags::EndStream);
+    }
+    header.length = static_cast<std::uint32_t>(block.size());
+    auto frame = FrameCodec::EncodeHeader(header);
+    frame.insert(frame.end(), block.begin(), block.end());
+    return frame;
+}
+
+std::vector<std::byte> MakeH2Data(
+    const std::uint32_t stream_id,
+    const std::string_view body)
+{
+    using namespace iocp::protocol::http2;
+    FrameHeader header;
+    header.type = FrameType::Data;
+    header.stream_id = stream_id;
+    header.flags =
+        static_cast<std::uint8_t>(FrameFlags::EndStream);
+    header.length = static_cast<std::uint32_t>(body.size());
+    auto frame = FrameCodec::EncodeHeader(header);
+    const auto* first =
+        reinterpret_cast<const std::byte*>(body.data());
+    frame.insert(frame.end(), first, first + body.size());
+    return frame;
+}
+
 void TestBasicServiceOverTcp()
 {
     auto logger = std::make_shared<iocp::core::Logger>();
@@ -260,6 +425,94 @@ void TestProtocolErrorResponseOverTcp()
     Check(server->Stop(), "HTTP server did not stop after protocol error");
 }
 
+void TestHttp2ServiceOverTcp()
+{
+    using namespace iocp::protocol::http2;
+
+    auto logger = std::make_shared<iocp::core::Logger>();
+    iocp::server::HttpServerOptions options;
+    options.listener.port = 0;
+    options.io_worker_count = 2;
+    options.application_worker_count = 2;
+    options.enable_http2 = true;
+    auto server =
+        iocp::server::HttpServer::Create(logger, options);
+
+    SocketHandle client = Connect(server->LocalPort());
+    H2SocketReader reader(client.Get());
+
+    const std::string preface(FrameCodec::kPreface);
+    std::vector<std::byte> preface_bytes(
+        reinterpret_cast<const std::byte*>(preface.data()),
+        reinterpret_cast<const std::byte*>(
+            preface.data() + preface.size()));
+    SendAll(client.Get(), preface_bytes, 1);
+    SendAll(client.Get(), FrameCodec::EncodeSettings({}));
+
+    HpackCodec request_encoder;
+    const auto stream1 =
+        MakeH2Headers(request_encoder, 1, "GET", "/health", true);
+    const auto stream3 =
+        MakeH2Headers(request_encoder, 3, "POST", "/echo", false);
+    const auto stream3_data = MakeH2Data(3, "hello");
+    SendAll(client.Get(), stream1, 3);
+    SendAll(client.Get(), stream3, 5);
+    SendAll(client.Get(), stream3_data, 2);
+
+    HpackCodec response_decoder;
+    std::unordered_map<std::uint32_t, std::string> bodies;
+    std::unordered_map<std::uint32_t, std::string> statuses;
+    std::unordered_map<std::uint32_t, bool> ended;
+
+    for (std::size_t count = 0;
+         count < 32 && (!ended[1] || !ended[3]);
+         ++count)
+    {
+        H2WireFrame frame = reader.ReadFrame();
+        if (frame.header.type == FrameType::Headers)
+        {
+            const auto headers = response_decoder.Decode(
+                frame.payload.data(), frame.payload.size());
+            for (const auto& header : headers)
+            {
+                if (header.name == ":status")
+                {
+                    statuses[frame.header.stream_id] =
+                        header.value;
+                }
+            }
+        }
+        else if (frame.header.type == FrameType::Data)
+        {
+            bodies[frame.header.stream_id].append(
+                reinterpret_cast<const char*>(
+                    frame.payload.data()),
+                frame.payload.size());
+        }
+
+        if ((frame.header.flags &
+             static_cast<std::uint8_t>(
+                 FrameFlags::EndStream)) != 0)
+        {
+            ended[frame.header.stream_id] = true;
+        }
+    }
+
+    Check(
+        ended[1] && ended[3],
+        "HTTP/2 responses did not finish both streams");
+    Check(
+        statuses[1] == "200" &&
+            bodies[1] == "{\"status\":\"ok\"}\n",
+        "HTTP/2 GET /health response was incorrect");
+    Check(
+        statuses[3] == "200" && bodies[3] == "hello",
+        "HTTP/2 POST /echo response was incorrect");
+
+    client.Reset();
+    Check(server->Stop(), "HTTP/2 server did not stop cleanly");
+}
+
 template <typename Test>
 bool RunTest(const char* name, Test test)
 {
@@ -288,5 +541,8 @@ int main()
     failures += !RunTest(
         "HTTP protocol error over TCP",
         TestProtocolErrorResponseOverTcp);
+    failures += !RunTest(
+        "HTTP/2 service over TCP",
+        TestHttp2ServiceOverTcp);
     return failures == 0 ? 0 : 1;
 }

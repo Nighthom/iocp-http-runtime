@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,12 @@ private:
 
     static std::vector<TableEntry> BuildStaticTable();
 
+    const TableEntry& Lookup(std::uint32_t index) const;
+    void AddDynamicEntry(
+        const std::string& name,
+        const std::string& value);
+    void EvictDynamicTable();
+
     std::uint32_t DecodeInteger(
         const std::byte* data,
         std::size_t& offset,
@@ -82,6 +89,8 @@ private:
     std::vector<TableEntry> static_table_;
     std::vector<TableEntry> dynamic_table_;
     std::size_t dynamic_table_size_{};
+    std::size_t current_dynamic_table_limit_{};
+    std::optional<std::size_t> pending_table_size_update_;
     HpackOptions options_;
 };
 
